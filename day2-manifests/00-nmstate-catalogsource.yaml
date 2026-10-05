@@ -14,6 +14,12 @@
 #
 # Mirror refresh: run scripts/mirror-nmstate-operator.sh on the KVM
 # host whenever the v4.22 index is updated (roughly every 2 weeks).
+#
+# The image host below is a PLACEHOLDER, not a resolvable registry, so
+# that no site-specific hostname is committed to this public repo.
+# scripts/apply-day2-prp.sh substitutes $MIRROR_REGISTRY_HOST at apply
+# time. Applying this file directly with `oc apply -f` uses the
+# placeholder and the catalog pod will fail to pull.
 apiVersion: operators.coreos.com/v1alpha1
 kind: CatalogSource
 metadata:

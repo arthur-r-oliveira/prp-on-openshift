@@ -271,6 +271,22 @@ if [ -d "$PRP_BENCH_REPO/k8s/base" ]; then
     && record PASS "prp-bench:deploy" "manifests applied from $PRP_BENCH_REPO" \
     || record FAIL "prp-bench:deploy" "oc apply failed"
 else
+  # "Use the already-deployed app" is only a valid fallback if there IS one.
+  # The matrix wipes and reinstalls both clusters, so after a wipe there is
+  # not, and assuming otherwise turns a missing checkout into four unrelated
+  # failures ("not ready within 300s" that actually returned NotFound in
+  # under a second) plus four minutes of endpoint polling. Check and abort.
+  missing=""
+  for spec in "$KUBECONFIG_A:sender" "$KUBECONFIG_B:receiver"; do
+    kc="${spec%%:*}"; role="${spec#*:}"
+    KUBECONFIG="$kc" oc get "deploy/prp-${role}" -n prp-bench >/dev/null 2>&1 \
+      || missing="${missing} prp-${role}"
+  done
+  if [ -n "$missing" ]; then
+    record FAIL "prp-bench:deploy" "no manifests at $PRP_BENCH_REPO and not already deployed:${missing} - set PRP_BENCH_REPO to a quarkus-prp-bench checkout"
+    echo; echo "== Summary: $PASS passed, $FAIL failed =="
+    exit 1
+  fi
   record PASS "prp-bench:deploy" "repo not present at $PRP_BENCH_REPO, using already-deployed app"
 fi
 

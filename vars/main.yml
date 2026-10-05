@@ -48,7 +48,13 @@ ssh_public_key_path: "/root/secrets/sno_id_ed25519.pub"
 # pre-mirrored here so the SNO nodes pull from the LAN instead of the
 # internet, avoiding the 10-20 minute catalog-pod startup that was
 # causing CI timeouts. See scripts/mirror-nmstate-operator.sh.
-mirror_registry_host: "bastion.lab.local"
+#
+# The default below is a placeholder, not a resolvable host. A real lab
+# supplies its own registry via MIRROR_REGISTRY_HOST so no site-specific
+# hostname is committed here; in CI that comes from a repository secret.
+# Leaving it unset means the catalog pod cannot pull and the Day-2 install
+# falls back to the upstream operator.
+mirror_registry_host: "{{ lookup('env', 'MIRROR_REGISTRY_HOST') | default('bastion.lab.local', true) }}"
 mirror_registry_port: 8443
 mirror_registry: "{{ mirror_registry_host }}:{{ mirror_registry_port }}"
 mirror_registry_ca_path: "/root/secrets/mirror-registry/ca.crt"

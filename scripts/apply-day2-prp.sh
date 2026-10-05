@@ -29,6 +29,13 @@ SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=y
 NMSTATE_VERSION="${NMSTATE_VERSION:-v0.87.0}"
 NMSTATE_BASE_URL="https://github.com/nmstate/kubernetes-nmstate/releases/download/${NMSTATE_VERSION}"
 
+# The CatalogSource manifest ships a placeholder registry host so that no
+# site-specific hostname is committed. A real lab exports its own; in CI
+# that comes from a repository secret. Tier 2 cannot work without it - the
+# placeholder does not resolve - so warn rather than spend 120s finding out.
+MIRROR_PLACEHOLDER_HOST="bastion.lab.local"
+MIRROR_REGISTRY_HOST="${MIRROR_REGISTRY_HOST:-$MIRROR_PLACEHOLDER_HOST}"
+
 FAIL=0
 
 wait_for() {
@@ -148,7 +155,14 @@ for pair in "sno-a:$KUBECONFIG_A" "sno-b:$KUBECONFIG_B"; do
   # Tier 2: add mirror registry CatalogSource (pruned 4.22 index) and retry
   if [ -z "$ns" ]; then
     echo "  Not in default catalogs, trying mirror registry..."
-    KUBECONFIG="$kc" oc apply -f day2-manifests/00-nmstate-catalogsource.yaml
+    if [ "$MIRROR_REGISTRY_HOST" = "$MIRROR_PLACEHOLDER_HOST" ]; then
+      echo "  WARNING: MIRROR_REGISTRY_HOST is unset, so the CatalogSource"
+      echo "  points at the placeholder ${MIRROR_PLACEHOLDER_HOST}, which does not"
+      echo "  resolve. Expect this tier to time out and fall back to upstream."
+    fi
+    sed "s|${MIRROR_PLACEHOLDER_HOST}|${MIRROR_REGISTRY_HOST}|g" \
+      day2-manifests/00-nmstate-catalogsource.yaml \
+      | KUBECONFIG="$kc" oc apply -f -
 
     if wait_for "${name} mirror catalog pod ready" 120 \
       "KUBECONFIG='$kc' oc get pods -n openshift-marketplace -l olm.catalogSource=redhat-operators-4-22 -o jsonpath='{.items[0].status.phase}' 2>/dev/null | grep -q Running"; then

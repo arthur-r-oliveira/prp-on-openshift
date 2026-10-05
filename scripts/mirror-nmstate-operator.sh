@@ -19,7 +19,10 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-MIRROR_HOST="${MIRROR_REGISTRY:-bastion.lab.local:8443}"
+# bastion.lab.local is a placeholder, not a resolvable host - set
+# MIRROR_REGISTRY_HOST (or MIRROR_REGISTRY for a full host:port) to your
+# own registry. Kept out of git so this public repo carries no lab names.
+MIRROR_HOST="${MIRROR_REGISTRY:-${MIRROR_REGISTRY_HOST:-bastion.lab.local}:${MIRROR_REGISTRY_PORT:-8443}}"
 SOURCE_INDEX="registry.redhat.io/redhat/redhat-operator-index:v4.22"
 PRUNED_TAG="${MIRROR_HOST}/redhat/redhat-operator-index:v4.22-nmstate-only"
 WORK_DIR="/tmp/mirror-nmstate-work"
