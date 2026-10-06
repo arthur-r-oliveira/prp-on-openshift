@@ -147,8 +147,10 @@ on `SIGKILL`, where a shell trap cannot run.
 
 It expects the benchmark repo checked out alongside this one
 (`../quarkus-prp-bench`, override with `PRP_BENCH_REPO`) so it can apply the
-manifests itself; if it isn't there, the script falls back to whatever is
-already deployed in the `prp-bench` namespace. Needs `jq` on the KVM host.
+manifests itself. If the repo is absent it will use an already-deployed app,
+but only after checking one is actually there - otherwise it aborts with a
+single clear message instead of four unrelated readiness failures. Needs
+`jq` on the KVM host.
 
 For the full "start from nothing, prove it" cycle:
 
@@ -159,6 +161,13 @@ Wipes every known SNO VM, deploys and tests Test Case 1, wipes, then deploys
 and tests Test Case 2, and writes a markdown report (default:
 `/tmp/sno-test-matrix-report.md`). This is what
 `.github/workflows/sno-test-matrix.yml` runs in CI.
+
+The UDP benchmark is **not** part of the matrix. It chains off it as a
+separate workflow (`.github/workflows/prp-bench.yml`), so a benchmark
+regression is visible on its own instead of as one line inside a two-hour
+run, and so it can be re-run against the live clusters without wiping them.
+Every suite's history is charted at
+**[the test health dashboard](https://arthur-r-oliveira.github.io/ocp-abi-local-sno/)**.
 
 Two things worth knowing before you run it:
 

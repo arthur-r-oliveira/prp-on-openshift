@@ -1,13 +1,26 @@
-# Upstream issue draft (1 of 2): nmstate/nmstate
+# Upstream issue draft (1 of 3): nmstate/nmstate
 
-**Target**: https://github.com/nmstate/nmstate/issues (primary). A Red Hat
-Bugzilla against the `nmstate` component is a reasonable alternative/mirror
-if that's the preferred internal path instead of, or in addition to, the
-public GitHub issue.
+**Target**: https://github.com/nmstate/nmstate/issues - or a PR directly,
+see "Filing order" below. The Red Hat-internal path is a Jira at
+https://issues.redhat.com, project **RHEL**, component **nmstate** -
+*not* Bugzilla, which is retired for new RHEL product bugs. See
+`rhel-jira-nmstate-hsr-gen-conf.md` for the Jira-shaped version of this
+same report.
+
+**Filing order**: RHEL Jira first, then upstream, then cross-link. The
+Jira is what creates a backport path into a shipped `nmstate` package - an
+upstream merge on its own delivers nothing to RHEL 10.2. But upstream is
+where the code has to land regardless: the RHEL package is a rebase of
+upstream, so a downstream-only fix would be dropped on the next rebase.
+Since the change here is five lines copied from an existing template,
+consider opening a PR rather than an issue and letting the review be the
+conversation.
 
 **Status**: drafted, not filed. This is the root-cause fix target - see
-the companion draft (`upstream-issue-2-agent-based-installer-hsr.md`) for
-the downstream tracking issue against the Agent-Based Installer side.
+`upstream-issue-2-agent-based-installer-hsr.md` for the downstream
+tracking issue against the Agent-Based Installer side, and
+`upstream-issue-3-assisted-installer-agent-hsr-inventory.md` for the
+separate inventory-collector defect.
 
 **Why this one first**: this is where the actual defect lives. Filing here
 gets the real fix moving; the ABI-side issue exists to track *consuming*
@@ -56,10 +69,13 @@ path is fine.
 `nmstate 2.2.60` (`nmstate-2.2.60-2.el10_2.x86_64`, RHEL 10.2).
 
 Also checked against the current `base` branch (upstream default branch,
-HEAD `70fa58c95bb80ff0e619e74f06d225948cd89fe2` as of 2026-09-17): the same
-gap is present there too. Not a regression that's already been fixed and
-just hasn't shipped yet - it looks like `gen_conf` support for `hsr` was
-simply never implemented.
+HEAD `7e698d62f875f4e885601c8db00be553d8958adb` as of 2026-10-06): the same
+gap is present there too, so this isn't a regression that's already been
+fixed and just hasn't shipped yet. From reading the tree it looks like
+`gen_conf` support for `hsr` was never implemented in the first place,
+rather than added and later broken - but I haven't verified the per-PR
+history myself, so I'd defer to maintainers on whether some earlier
+change was expected to have covered it.
 
 ### To Reproduce
 
@@ -98,10 +114,12 @@ interfaces:
 $ nmstatectl gc hsr-state.yaml
 ```
 
-Note: `eth0`/`eth1` must share one `mac-address` in this example - HSR
-validation correctly rejects differing port MACs (one logical LRE
-identity presented out two ports), and that's not related to this bug;
-included only so the repro is directly copy-pasteable.
+Note: the explicit `mac-address` on `eth0`/`eth1` is optional -
+`copy_hsr_mac()` propagates one automatically. It's spelled out here only
+to keep the repro self-contained. If you do set both, they have to match:
+`validate_hsr_mac()` rejects differing port MACs on a PRP interface (one
+logical LRE identity presented out two ports). That validation is correct
+and unrelated to this bug.
 
 ### Expected behavior
 
@@ -110,11 +128,12 @@ The generated `prp0.nmconnection` includes a populated `[hsr]` section:
 [hsr]
 port1=eth0
 port2=eth1
-multicast-spec=0
 prp=true
 ```
-matching what the same input produces via `nmstatectl set` on a live
-system.
+i.e. the keyfile equivalent of what the same input already sends over
+D-Bus via `nmstatectl set` on a live system. (No `multicast-spec` line:
+`NmSettingHsr::to_value()` only emits it when `> 0`, so the default `0`
+is correctly left out of both paths. Keys come out sorted.)
 
 ### Actual behavior
 
@@ -138,7 +157,7 @@ cloned-mac-address=52:54:00:AA:AA:10
 ```
 No `[hsr]` section anywhere in the file.
 
-### Suspected root cause (traced in source, tag `v2.2.60`)
+### Suspected root cause (traced in source, tag `v2.2.60` and current `base`)
 
 The in-memory model is correct in **both** modes - this isn't a data
 problem, it's a serialization gap in exactly one of two parallel writers.
@@ -151,8 +170,9 @@ Interface::Hsr(iface) => {
 }
 ```
 and `settings/hsr.rs`'s `gen_nm_hsr_setting()` correctly populates
-`nm_conn.hsr` with `port1`, `port2`, `interlink`, `multicast_spec`, `prp`,
-`protocol_version` regardless of which mode is calling it.
+`nm_conn.hsr` - `port1`, `port2`, `interlink`, `multicast_spec`, `prp`,
+plus `protocol_version` for HSRv1/2012 - regardless of which mode is
+calling it.
 
 The two modes only diverge at the final serialization step:
 
@@ -168,27 +188,33 @@ The two modes only diverge at the final serialization step:
   `NmSettingHsr` - **present and correct**.
 
 - **Offline generate** (`gc`) → `nm/gen_conf.rs`'s `nm_gen_conf()` →
-  `NmConnection::to_keyfile()` (`nm_dbus/gen_conf/conn.rs`) - this function
-  has an explicit branch for every other optional settings type (`bond`,
-  `bond_port`, `bridge`, `bridge_port`, `ovs_bridge`, `ovs_port`,
-  `ovs_iface`, `ovs_patch`, `ovs_dpdk`, `wired`, `vlan`, `vxlan`, `sriov`,
-  `mac_vlan`, `macsec`, `vrf`, `veth`, `user`, `ieee8021x`, `ethtool`,
-  `infiniband`, `ovs_ext_ids`, `ovs_other_config`, `vpn`, `iface_match`) -
-  and **none for `hsr`**. There is also no `hsr.rs` module at all under
-  `nm_dbus/gen_conf/`, unlike every type just listed, each of which has
-  its own file there implementing `ToKeyfile`.
+  `NmConnection::to_keyfile()` (`nm_dbus/gen_conf/conn.rs`), which has a
+  `sections.push(...)` branch per settings type - and **none for `hsr`**.
+  There is also no `hsr.rs` under `nm_dbus/gen_conf/` providing the
+  `ToKeyfile` impl.
 
 So `self.hsr` is fully populated by the time `to_keyfile()` runs, but that
 function simply never looks at it.
 
+There's no fallback branch or `_other` passthrough in `to_keyfile()`
+either, so the setting isn't mangled or partially written - it's dropped
+silently. No warning, no error, just a keyfile that NetworkManager then
+refuses to load.
+
 ### Suggested fix
 
-Add `rust/src/lib/nm/nm_dbus/gen_conf/hsr.rs` implementing `ToKeyfile for
-NmSettingHsr` - the field list is small and already known
-(`port1`/`port2`/`interlink`/`multicast-spec`/`prp`/`protocol-version`),
-and `vrf.rs` or `veth.rs` in the same directory are reasonable templates
-for the shape (a small optional settings struct with a handful of scalar
-fields). Then wire it in:
+Since `ToKeyfile`'s default body just reuses `ToDbusValue::to_value()`,
+and `NmSettingHsr` already has a correct `ToDbusValue` impl, no field
+list needs writing - this is five lines, following `vrf.rs`:
+
+- `rust/src/lib/nm/nm_dbus/gen_conf/hsr.rs` (new):
+  ```rust
+  // SPDX-License-Identifier: Apache-2.0
+
+  use super::super::{NmSettingHsr, ToKeyfile};
+
+  impl ToKeyfile for NmSettingHsr {}
+  ```
 - `nm_dbus/gen_conf/mod.rs`: add `mod hsr;`
 - `nm_dbus/gen_conf/conn.rs`'s `NmConnection::to_keyfile()`: add
   ```rust
@@ -198,10 +224,22 @@ fields). Then wire it in:
   ```
   alongside the existing branches.
 
+There's no unit-test coverage of keyfile generation to extend other than
+`unit_tests/ovs.rs`, so I'd propose a small `nmstatectl gc` round-trip
+test for `hsr` unless maintainers prefer it elsewhere.
+
 Happy to submit a PR for this if a maintainer confirms the approach and
 there isn't a reason `hsr` was deliberately left out of `gen_conf`
-(couldn't find one in the source or CHANGELOG, but flagging the
+(couldn't find one in the source or the CHANGELOG, but flagging the
 possibility rather than assuming).
+
+### Related
+
+Searched open and closed issues and PRs for an existing report of this
+and didn't find one. #2302 ("Feature request: Support for PRP/HSR")
+appeared to still be open when I checked, even though the feature itself
+has clearly landed - if that's still the case, this gap may be part of
+why it hasn't been closed out.
 
 ### Downstream impact (context, not part of the ask)
 
@@ -213,7 +251,7 @@ own tooling shows the user - only visible via NetworkManager's journal on
 the (possibly otherwise unreachable) node itself. A separate downstream
 tracking issue covers that side; linking here once both exist.
 
-### Update: the suggested fix is confirmed correct, not just theorized
+### Update: the suggested fix is confirmed correct for the PRP case
 
 Validated by hand-writing exactly the keyfile section the analysis above
 says `to_keyfile()` is missing - same field names, same values `nmstate`
@@ -222,6 +260,11 @@ and merging it into a real boot's NetworkManager configuration in place
 of `gen_conf`'s output. Result: `prp0` comes up correctly, real `proto 1`
 (PRP), full IP connectivity. This isn't a second, independent
 confirmation of a different bug - it's the same one, closed by supplying
-by hand exactly what the missing `hsr.rs` module would generate. Strong
-signal that the suggested fix above is both correct and sufficient, not
-just plausible.
+by hand exactly what the missing `hsr.rs` module would generate.
+
+To be precise about what that does and doesn't establish: the section
+exercised was `port1`/`port2`/`prp=true` - the PRP path. The HSR protocol
+variants and `interlink` go through the same default `ToKeyfile` body and
+the same already-correct `ToDbusValue` impl, so they should follow by
+construction, but I haven't put them on a wire. Confirmed for PRP,
+expected-correct for the rest of the `hsr` type.

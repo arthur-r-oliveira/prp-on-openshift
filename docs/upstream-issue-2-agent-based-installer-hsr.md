@@ -1,19 +1,23 @@
-# Upstream issue draft (2 of 2): OpenShift Agent-Based Installer
+# Upstream issue draft (2 of 3): OpenShift Agent-Based Installer
 
-**Target**: Red Hat Bugzilla, component **Assisted Installer** (product:
-OpenShift Container Platform) is likely the right primary path here,
-since the actual generation of the Day-0 network config from
-`AgentConfig`/`NMStateConfig` happens in assisted-service's territory
-(confirmed by the on-node file layout - see "Evidence" below - not by
-reading assisted-service's own source, which wasn't traced the way
+**Target**: Jira at https://issues.redhat.com, project **OCPBUGS**,
+component **Assisted Installer**. (Not Bugzilla - retired for new
+OpenShift product bugs. Confirm the exact component string against the
+project's component list before filing.) That looks like the right
+primary path here, since the actual generation of the Day-0 network
+config from `AgentConfig`/`NMStateConfig` happens in assisted-service's
+territory (confirmed by the on-node file layout - see "Evidence" below -
+not by reading assisted-service's own source, which wasn't traced the way
 nmstate's was for the companion issue). A GitHub issue against
-`openshift/assisted-service` is a reasonable alternative or mirror if
-that project takes issues directly; check current practice before filing.
+`openshift/assisted-service` is a reasonable mirror if that project takes
+issues directly.
 
 **Status**: drafted, not filed. This is the **downstream tracking issue**
-- the actual defect lives in `nmstate` (see
-`upstream-issue-1-nmstate-hsr-gen-conf.md`). File that one first or
-alongside this one, and link it here once it has a number.
+- the actual defect lives in `nmstate`: see
+`upstream-issue-1-nmstate-hsr-gen-conf.md` for the source trace, and
+`rhel-jira-nmstate-hsr-gen-conf.md` for the RHEL Jira that is what
+actually produces a fixed package. File those first or alongside this
+one, and link them here once they have numbers.
 
 **Why file this too, rather than only the nmstate issue**: three reasons.
 1. Someone triaging Agent-Based Installer bugs needs to find this without
