@@ -197,10 +197,39 @@ Once `kubernetes-nmstate-operator` ships in OCP 5.0's own default catalog,
 delete this workaround `CatalogSource` and point the `Subscription` back
 at `redhat-operators`.
 
+#### Pruned local mirror, and why tier 2 currently fails in CI
+
+The "few restart cycles" above turned into 10-20 minute catalog-pod
+startups and repeated CI timeouts, because the full `v4.22` index carries
+151 operators and the `startupProbe` is not patient enough to build that
+query cache. `scripts/mirror-nmstate-operator.sh` prunes the index to
+`kubernetes-nmstate-operator` only and mirrors it to a local registry; the
+pruned index caches in seconds, and the catalog pod went Ready in ~20s.
+
+That worked until the repo's history was scrubbed of internal lab
+hostnames, which replaced the registry host with a placeholder that does
+not resolve. The host now comes from `MIRROR_REGISTRY_HOST` (a CI secret),
+with the placeholder as the committed default, so no site-specific name
+sits in this public repo.
+
+**The part worth recording for anyone reproducing this:** supplying that
+variable at Day-2 is not sufficient. Pointing the `CatalogSource` at a
+reachable mirror still failed with `authentication required`, because a
+cluster's mirror credentials, CA trust and `ImageDigestMirrorSet` are all
+**Day-0** artifacts - baked in at install time from the pull secret and
+extra manifests. A cluster installed against the placeholder can never use
+the mirror, no matter what is applied afterwards; it has to be reinstalled
+with the variable set. Until then, tier 3 (upstream) is what runs, which is
+why recent CI runs show `Falling back to upstream kubernetes-nmstate`.
+
 ### Applying the fix
 
+`scripts/apply-day2-prp.sh` does all of this against both clusters, with
+waits between each step, and is what CI runs. The manual sequence below is
+kept because it is what the script automates, not as a separate path:
+
 ```
-oc apply -f day2-manifests/00-nmstate-catalogsource.yaml
+oc apply -f day2-manifests/00-nmstate-catalogsource.yaml   # only if not in a default catalog
 oc apply -f day2-manifests/01-nmstate-operator-subscription.yaml
 # wait: oc get csv -n openshift-nmstate -> Succeeded
 oc apply -f day2-manifests/02-nmstate-cr.yaml
@@ -208,6 +237,21 @@ oc apply -f day2-manifests/02-nmstate-cr.yaml
 oc apply -f day2-manifests/03-nncp-sno-a.yaml   # (or -sno-b.yaml, on that cluster)
 oc apply -f day2-manifests/04-hsr-module-autoload.yaml
 ```
+
+The script resolves the operator in three tiers, in order, because none of
+them is reliable on its own at this release:
+
+1. **Any default catalog** - works the day the operator ships in OCP 5.0's
+   own catalog, at which point tiers 2 and 3 become dead code.
+2. **The pruned local mirror** (`00-nmstate-catalogsource.yaml`) - see the
+   next section.
+3. **Upstream `kubernetes-nmstate` from GitHub releases** (currently
+   v0.87.0), applied as plain manifests with no OLM involvement.
+
+Tier 3 is not a formality: it is what has actually been installing the
+operator in CI recently, after tier 2 stopped working (below). PRP itself
+is unaffected by which tier wins - the NNCP and the resulting `prp0` are
+identical - but a Red Hat-supported deployment would want tier 1.
 ```
 $ oc get nncp prp0-hsr
 NAME       STATUS      REASON
@@ -295,6 +339,71 @@ the protocol level. Symmetric on sno-b (registers sno-a's MAC the same
 way). `scripts/test-prp-failover.sh` asserts this table is non-empty on
 both nodes.
 
+### 6. Under real load: 1.5M packets across two link cuts
+
+Checks 1-5 prove PRP with `ping` - roughly one packet per second. That is
+enough to show the mechanism works and nothing like enough to show it
+holds up under traffic. `scripts/test-prp-bench.sh` drives the
+[prp-bench](https://github.com/arthur-r-oliveira/quarkus-prp-bench) UDP
+sender/receiver across `prp0` for 300 seconds and cuts `prp-lan-a`, then
+`prp-lan-b`, for 30 seconds each while traffic flows.
+
+**The load is not the point; what it asserts is.** PRP masks a dead LAN so
+completely that loss stays zero and no application metric moves, so a test
+that cuts a link and checks only for 0% loss passes identically whether the
+cut happened or silently failed. That was verified, not assumed: with
+`virsh domif-setlink` stubbed to a no-op, the zero-loss check still passed
+at 449,930/450,000. The suite therefore also asserts that each cut
+*actually degraded redundancy* - the named interface's `rxPerSec` dropping
+to 0 while its partner carries the full rate - and that both recovered.
+Those four assertions are what give the zero-loss number meaning.
+
+Representative results, all on OCP 5.0.0-rc.2, dual-sidecar-prp:
+
+| Rate | Sent / received | Loss | Redundancy assertions | RTT p50 / p99 | Verdict |
+|---|---|---|---|---|---|
+| 1500 msg/s | 450,000 / 449,996 | no sequence gaps (delta 4, startup race) | 4/4 pass | 819 us / 2.20 ms | **14/14 pass** |
+| 5000 msg/s | 1,500,017 / 1,499,421 | no sequence gaps (delta 596) | 4/4 pass | 434 us / 2.22 ms | **14/14 pass** |
+| 5000 msg/s | 1,500,028 / 1,493,661 | 6,012 lost (0.4%) | 4/4 pass | 467 us / 2.48 ms | 12/14 - see below |
+
+The `sent`/`received` delta is checked separately from the sequence-gap
+count because each is blind to something the other catches: `lost` is
+gap-anchored to the first sequence number the receiver sees, so it cannot
+see packets missing at the very start or end of a run, while the delta can
+but cannot say where they went. The tolerance (`RATE / 4`, a quarter-second
+of traffic) absorbs a real startup race - the sender's `/api/stats/start`
+resets the receiver's counter asynchronously, so the first few packets can
+land before the counter is listening. Real loss during a 30-second outage
+would be `CUT_LEN * RATE` packets, two orders of magnitude above that
+tolerance, so a missed cut cannot hide inside it.
+
+#### The 5000 msg/s loss is receiver-side, not PRP
+
+One run at 5000 msg/s failed `zero-loss` and `no-kernel-drops` together:
+6,012 packets lost alongside **1,020 `udpRcvbufErrors`**. Those two numbers
+are the same event. `udpRcvbufErrors` is the kernel discarding datagrams
+because the receive buffer was full - the packets crossed the PRP link and
+were dropped after arrival, by the receiving host, not lost on the wire.
+
+Three things corroborate that reading:
+
+- All four redundancy assertions passed in that same run. Both cuts
+  degraded and recovered correctly, so the link behaved exactly as in the
+  passing runs.
+- The hypervisor was not contended: load average 7.86 across 72 CPUs, with
+  no concurrent CI job.
+- The same code, same clusters, ~20 minutes apart, passed cleanly at 1500
+  msg/s and in an earlier 5000 msg/s run.
+
+So this is a property of the benchmark application's socket buffer
+(`SO_RCVBUF` / `net.core.rmem_max` in the receiver pod), not a PRP or
+OpenShift defect. It is recorded here rather than tuned away because it
+sets an honest ceiling on what these runs demonstrate: **PRP redundancy is
+proven to ~1.5M packets with zero wire loss, and the harness itself becomes
+the bottleneck somewhere around 5000 msg/s on this hardware.** A single
+green 5000 msg/s run is weaker evidence than it looks; 1500 msg/s is
+currently the rate that reproduces reliably.
+
 ### Pass criteria summary
 
 | Check | Expected | 5.0.0-rc.2 result |
@@ -305,8 +414,11 @@ both nodes.
 | Single-path failure, mid-traffic | **0% packet loss** for the duration | Pass - 97/97 |
 | Link restore | both ports return to `UP`/`LOWER_UP`, `prp0` still `proto 1` | Pass |
 | `/sys/kernel/debug/hsr/prp0/node_table` | peer MAC registered, `DAN-P: 1` | Pass |
+| 300s UDP benchmark, two 30s cuts | no sequence gaps; both cuts degrade and recover | Pass - 14/14 at 1500 msg/s |
 
-All six passed on both `sno-a` and `sno-b`, on both OCP versions tested.
+All six original checks passed on both `sno-a` and `sno-b`, on both OCP
+versions tested. The benchmark (check 6) is newer and runs only on the
+5.0.0-rc.2 dual-sidecar-prp topology; see the rate caveat above.
 
 ## Alignment with Red Hat's KB on configuring HSR/PRP with nmstate
 
@@ -395,10 +507,32 @@ not a dead end.
 ### Automated
 
 ```bash
-./scripts/test-prp-failover.sh
+./scripts/test-prp-failover.sh   # checks 1-5: health, prp0 mode, reachability,
+                                 # one hypervisor-level cut, node_table
+./scripts/test-prp-bench.sh      # check 6: 300s UDP benchmark, two 30s cuts
 ```
 
-Runs all 5 checks below in sequence. Exit 0 = all passed. All defaults match `vars/main.yml`; override via env vars if needed (`NODE_A_IP`, `KUBECONFIG_A`, etc.).
+Exit 0 = all passed. All defaults match `vars/main.yml`; override via env
+vars if needed (`NODE_A_IP`, `KUBECONFIG_A`, `RATE`, `DURATION`, ...).
+
+`test-prp-bench.sh` needs the benchmark repo checked out and pointed at by
+`PRP_BENCH_REPO` (it defaults to `../quarkus-prp-bench`, a sibling of this
+one) so it can apply the manifests itself. If the repo is absent **and** the
+app is not already deployed, it aborts immediately rather than reporting a
+cascade of unrelated readiness failures. It also needs `jq` on the KVM host,
+and is safe to interrupt: a detached watchdog restores both links even on
+`SIGKILL`, where a shell trap cannot run.
+
+In CI these are three separate workflows, so each reports as its own suite:
+
+| Workflow | Trigger | What it runs |
+|---|---|---|
+| `sno-test-matrix.yml` | manual | wipe → Test Case 1 → wipe → Test Case 2 → Day-2 PRP → failover suite |
+| `prp-test.yml` | daily + manual | failover suite against whatever is running |
+| `prp-bench.yml` | after the matrix, + manual | the UDP benchmark (rate/duration/payload are inputs) |
+
+Historical pass rates per test and per run:
+**https://arthur-r-oliveira.github.io/ocp-abi-local-sno/**
 
 ### Manual sanity checks
 
