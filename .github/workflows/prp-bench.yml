@@ -1,0 +1,121 @@
+name: PRP UDP benchmark
+
+# Chains off the matrix rather than living inside it: the matrix finishes by
+# leaving dual-sidecar-prp running, which is exactly the state this needs. Also
+# runnable on its own against whatever is already up - the clusters usually are.
+on:
+  workflow_run:
+    workflows: ["SNO test matrix (wipe + single + dual-sidecar-prp)"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: "Messages per second"
+        default: "5000"
+      duration:
+        description: "Run length in seconds"
+        default: "300"
+      payload:
+        description: "Payload bytes"
+        default: "256"
+
+permissions:
+  contents: read
+
+# Cutting PRP links is destructive to anything else measuring the same lab,
+# so never run two of these at once - and let a run in progress finish.
+concurrency:
+  group: prp-bench
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    # A failed matrix usually means no healthy clusters to benchmark, so skip
+    # rather than report a cascade of failures that say nothing about PRP.
+    # A manual dispatch always runs.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: [self-hosted, kvm-prp-lab]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      # The benchmark applies this repo's k8s manifests. Without it the script
+      # falls back to "whatever is already deployed", which after a matrix
+      # wipe is nothing.
+      - uses: actions/checkout@v5
+        with:
+          repository: arthur-r-oliveira/quarkus-prp-bench
+          path: quarkus-prp-bench
+
+      - name: Run the UDP benchmark under dual link cuts
+        id: bench
+        env:
+          PRP_BENCH_REPO: ${{ github.workspace }}/quarkus-prp-bench
+          RATE: ${{ inputs.rate || '5000' }}
+          DURATION: ${{ inputs.duration || '300' }}
+          PAYLOAD: ${{ inputs.payload || '256' }}
+        run: |
+          mkdir -p "${{ runner.temp }}/test-results"
+          ./scripts/test-prp-bench.sh 2>&1 \
+            | tee "${{ runner.temp }}/test-results/prp-bench.log"
+          exit ${PIPESTATUS[0]}
+
+      # Always convert: a failed benchmark is the run the dashboard most needs.
+      - name: Convert results to JUnit XML
+        if: always()
+        run: |
+          ./scripts/to-junit-xml.sh prp-bench \
+            < "${{ runner.temp }}/test-results/prp-bench.log" \
+            > "${{ runner.temp }}/test-results/prp-bench.xml"
+
+      - name: Generate job summary
+        if: always()
+        run: |
+          LOG="${{ runner.temp }}/test-results/prp-bench.log"
+          PASS=$(grep -c '^\[PASS\]' "$LOG" 2>/dev/null || echo 0)
+          FAIL=$(grep -c '^\[FAIL\]' "$LOG" 2>/dev/null || echo 0)
+          TOTAL=$((PASS + FAIL))
+
+          if [ "$FAIL" -eq 0 ]; then
+            BADGE="![pass](https://img.shields.io/badge/PRP_benchmark-${PASS}%2F${TOTAL}_passed-brightgreen)"
+          else
+            BADGE="![fail](https://img.shields.io/badge/PRP_benchmark-${FAIL}%2F${TOTAL}_failed-red)"
+          fi
+
+          {
+            echo "## $BADGE"
+            echo ""
+            echo "\`${{ inputs.rate || '5000' }}\` msg/s · \`${{ inputs.payload || '256' }}\` B payload · \`${{ inputs.duration || '300' }}\` s · two 30s PRP link cuts"
+            echo ""
+            echo "| Status | Test | Detail |"
+            echo "|--------|------|--------|"
+            while IFS= read -r line; do
+              case "$line" in
+                \[PASS\]*|\[FAIL\]*)
+                  status="${line%%]*}"; status="${status#[}"
+                  rest="${line#*] }"
+                  name="${rest%% - *}"
+                  detail=""
+                  [[ "$rest" == *" - "* ]] && detail="${rest#* - }"
+                  icon=":white_check_mark:"
+                  [ "$status" = "FAIL" ] && icon=":x:"
+                  echo "| $icon | \`${name}\` | ${detail} |"
+                  ;;
+              esac
+            done < "$LOG"
+            echo ""
+            echo "---"
+            echo "_Runner: \`kvm-prp-lab\` | $(date -u '+%Y-%m-%d %H:%M UTC')_"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prp-bench-results
+          path: |
+            ${{ runner.temp }}/test-results/
+            /tmp/sno-test-matrix-logs/prp-bench-samples.jsonl
+          retention-days: 90
