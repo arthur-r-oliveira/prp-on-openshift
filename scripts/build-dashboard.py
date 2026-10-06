@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 # own name; this only controls the compact labels used in the legend.
 WORKFLOW_LABELS = {
     "PRP failover test": "PRP failover",
+    "PRP UDP benchmark": "PRP benchmark",
     "SNO test matrix (wipe + single + dual-sidecar-prp)": "SNO matrix",
 }
 
@@ -176,6 +177,8 @@ HTML = """<!DOCTYPE html>
     --border: rgba(11,11,11,0.10);
     --series-1: #2a78d6;
     --series-2: #eb6834;
+    --series-3: #1baf7a;
+    --series-4: #eda100;
     --good: #0ca30c;
     --critical: #d03b3b;
     --good-wash: rgba(12,163,12,0.14);
@@ -188,6 +191,7 @@ HTML = """<!DOCTYPE html>
       --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
       --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
       --series-1: #3987e5; --series-2: #d95926;
+      --series-3: #199e70; --series-4: #c98500;
       --good-wash: rgba(12,163,12,0.22); --critical-wash: rgba(208,59,59,0.22);
     }
   }
@@ -197,6 +201,7 @@ HTML = """<!DOCTYPE html>
     --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
     --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
     --series-1: #3987e5; --series-2: #d95926;
+      --series-3: #199e70; --series-4: #c98500;
     --good-wash: rgba(12,163,12,0.22); --critical-wash: rgba(208,59,59,0.22);
   }
 
@@ -448,9 +453,13 @@ function bars() {
 /* ------------- Line over time ------------- */
 function line() {
   const suites = [...new Set(D.runs.map(r => r.label))];
-  const colors = ['var(--series-1)', 'var(--series-2)'];
+  /* Fixed slot order, never cycled: a suite keeps its hue as others come and
+     go. Past the four slots the tail goes gray rather than inventing a hue
+     no one could tell from an existing one. */
+  const SLOTS = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-4)'];
+  const colorOf = i => i < SLOTS.length ? SLOTS[i] : 'var(--muted)';
   document.getElementById('lineLegend').innerHTML = suites.map((s, i) =>
-    `<span><i class="swatch" style="background:${colors[i % 2]}"></i>${esc(s)}</span>`).join('');
+    `<span><i class="swatch" style="background:${colorOf(i)}"></i>${esc(s)}</span>`).join('');
 
   const Lp = 44, Rp = 92, TOP = 14, H = 210;
   const svg = svgEl('svg', {viewBox: `0 0 860 ${H + 46}`,
@@ -473,14 +482,14 @@ function line() {
     if (pts.length > 1) {
       const path = svgEl('path', {
         d: pts.map((p, k) => `${k ? 'L' : 'M'}${X(p.i)},${Y(p.rate)}`).join(' '),
-        fill: 'none', stroke: colors[si % 2], 'stroke-width': 2,
+        fill: 'none', stroke: colorOf(si), 'stroke-width': 2,
         'stroke-linejoin': 'round', 'stroke-linecap': 'round'});
       svg.appendChild(path);
     }
     pts.forEach(p => {
       // 2px surface ring keeps overlapping markers separable.
       svg.appendChild(svgEl('circle', {cx: X(p.i), cy: Y(p.rate), r: 5,
-                                       fill: colors[si % 2], stroke: 'var(--surface-1)',
+                                       fill: colorOf(si), stroke: 'var(--surface-1)',
                                        'stroke-width': 2}));
     });
     // Direct-label the endpoint only.
