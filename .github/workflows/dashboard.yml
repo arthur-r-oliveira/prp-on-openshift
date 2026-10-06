@@ -1,0 +1,53 @@
+name: Test health dashboard
+
+# Rebuilds after either test workflow finishes, so the published page always
+# reflects the latest run. workflow_run fires regardless of the triggering
+# run's outcome - a failed run is exactly the one worth charting.
+on:
+  workflow_run:
+    workflows:
+      - "PRP failover test"
+      - "SNO test matrix (wipe + single + dual-sidecar-prp)"
+    types: [completed]
+  workflow_dispatch: {}
+
+# Only read the API; Pages gets its own write via the deploy job's token.
+permissions:
+  contents: read
+  actions: read
+
+# Never let two builds race the Pages deployment, but don't cancel one
+# mid-publish either.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # GitHub-hosted: this only talks to the API, so it must not occupy the
+    # lab runner (which may be mid-install for hours).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build dashboard from run artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/build-dashboard.py --out site/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
