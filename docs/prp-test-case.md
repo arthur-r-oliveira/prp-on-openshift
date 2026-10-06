@@ -362,9 +362,10 @@ Representative results, all on OCP 5.0.0-rc.2, dual-sidecar-prp:
 
 | Rate | Sent / received | Loss | Redundancy assertions | RTT p50 / p99 | Verdict |
 |---|---|---|---|---|---|
-| 1500 msg/s | 450,000 / 449,996 | no sequence gaps (delta 4, startup race) | 4/4 pass | 819 us / 2.20 ms | **14/14 pass** |
 | 5000 msg/s | 1,500,017 / 1,499,421 | no sequence gaps (delta 596) | 4/4 pass | 434 us / 2.22 ms | **14/14 pass** |
-| 5000 msg/s | 1,500,028 / 1,493,661 | 6,012 lost (0.4%) | 4/4 pass | 467 us / 2.48 ms | 12/14 - see below |
+| 5000 msg/s | 1,500,028 / 1,493,661 | 6,012 lost (0.4%), **1,020 `udpRcvbufErrors`** | 4/4 pass | 467 us / 2.48 ms | 12/14 |
+| 1500 msg/s | 450,000 / 449,996 | no sequence gaps (delta 4, startup race) | 4/4 pass | 819 us / 2.20 ms | **14/14 pass** |
+| 1500 msg/s | 450,000 / 448,652 | 1,326 lost (0.29%), **no kernel drops** | 4/4 pass | 737 us / 3.00 ms | 13/14 |
 
 The `sent`/`received` delta is checked separately from the sequence-gap
 count because each is blind to something the other catches: `lost` is
@@ -377,32 +378,45 @@ land before the counter is listening. Real loss during a 30-second outage
 would be `CUT_LEN * RATE` packets, two orders of magnitude above that
 tolerance, so a missed cut cannot hide inside it.
 
-#### The 5000 msg/s loss is receiver-side, not PRP
+#### Open: `zero-loss` is intermittent, and not fully explained
 
-One run at 5000 msg/s failed `zero-loss` and `no-kernel-drops` together:
-6,012 packets lost alongside **1,020 `udpRcvbufErrors`**. Those two numbers
-are the same event. `udpRcvbufErrors` is the kernel discarding datagrams
-because the receive buffer was full - the packets crossed the PRP link and
-were dropped after arrival, by the receiving host, not lost on the wire.
+**This is the one unresolved item in the PRP test case.** Across four runs,
+`zero-loss` passed twice and failed twice, at both rates. Every other
+assertion - including all four redundancy assertions - passed in all four.
 
-Three things corroborate that reading:
+The two failures do **not** share a cause:
 
-- All four redundancy assertions passed in that same run. Both cuts
-  degraded and recovered correctly, so the link behaved exactly as in the
-  passing runs.
-- The hypervisor was not contended: load average 7.86 across 72 CPUs, with
-  no concurrent CI job.
-- The same code, same clusters, ~20 minutes apart, passed cleanly at 1500
-  msg/s and in an earlier 5000 msg/s run.
+- **At 5000 msg/s**, the 6,012 lost packets came with **1,020
+  `udpRcvbufErrors`**. Those are the same event: the kernel discarding
+  datagrams because the receive buffer was full. The packets crossed the
+  link and were dropped *after* arrival by the receiving host. That is the
+  benchmark application's socket buffer (`SO_RCVBUF` /
+  `net.core.rmem_max`), not a PRP or OpenShift defect.
+- **At 1500 msg/s**, 1,326 packets were lost with **`udpRcvbufErrors`
+  unchanged**, and `lost` is the gap-anchored counter, so these were real
+  sequence gaps mid-stream rather than a startup artefact. The
+  receive-buffer explanation does not apply. **Where these went is not yet
+  established.**
 
-So this is a property of the benchmark application's socket buffer
-(`SO_RCVBUF` / `net.core.rmem_max` in the receiver pod), not a PRP or
-OpenShift defect. It is recorded here rather than tuned away because it
-sets an honest ceiling on what these runs demonstrate: **PRP redundancy is
-proven to ~1.5M packets with zero wire loss, and the harness itself becomes
-the bottleneck somewhere around 5000 msg/s on this hardware.** A single
-green 5000 msg/s run is weaker evidence than it looks; 1500 msg/s is
-currently the rate that reproduces reliably.
+What this does and does not undermine:
+
+- **PRP redundancy behaviour is not in question.** `cut1-degraded`,
+  `cut1-recovered`, `cut2-degraded` and `cut2-recovered` have passed in
+  every run, at both rates, in CI and by hand. The link demonstrably keeps
+  carrying traffic through a dead LAN.
+- **The unqualified claim "zero packet loss" is not currently
+  reproducible.** The best run is genuine - 1.5M packets, no sequence gaps,
+  across two 30-second outages - but it is not yet something we can assert
+  on demand.
+
+Candidates not yet ruled out: sender-side pacing or send-buffer pressure,
+duplicate-discard behaviour in the `hsr` driver under sustained load,
+virtio/vhost queue behaviour on this host, or an application-level gap in
+prp-bench itself. The cheapest next step is to run several iterations at a
+fixed rate and correlate losses against the sample timeline
+(`prp-bench-samples.jsonl`) to see whether the gaps cluster around the cut
+windows or are spread through the run - the former would point at PRP, the
+latter away from it.
 
 ### Pass criteria summary
 
@@ -414,11 +428,14 @@ currently the rate that reproduces reliably.
 | Single-path failure, mid-traffic | **0% packet loss** for the duration | Pass - 97/97 |
 | Link restore | both ports return to `UP`/`LOWER_UP`, `prp0` still `proto 1` | Pass |
 | `/sys/kernel/debug/hsr/prp0/node_table` | peer MAC registered, `DAN-P: 1` | Pass |
-| 300s UDP benchmark, two 30s cuts | no sequence gaps; both cuts degrade and recover | Pass - 14/14 at 1500 msg/s |
+| 300s UDP benchmark, both cuts degrade and recover | redundancy holds under load | Pass - 4/4 runs |
+| 300s UDP benchmark, no sequence gaps | zero loss end to end | **Intermittent - 2/4 runs** |
 
 All six original checks passed on both `sno-a` and `sno-b`, on both OCP
-versions tested. The benchmark (check 6) is newer and runs only on the
-5.0.0-rc.2 dual-sidecar-prp topology; see the rate caveat above.
+versions tested. The benchmark (check 6) is newer, runs only on the
+5.0.0-rc.2 dual-sidecar-prp topology, and splits in two: its redundancy
+assertions pass consistently, its zero-loss assertion does not yet. See
+the open item above.
 
 ## Alignment with Red Hat's KB on configuring HSR/PRP with nmstate
 
