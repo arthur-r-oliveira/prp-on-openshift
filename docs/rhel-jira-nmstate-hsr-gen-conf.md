@@ -33,13 +33,81 @@ nmstatectl gc generates an unloadable NetworkManager keyfile for hsr (HSR/PRP) i
 ## Component / version
 
 - **Component**: `nmstate`
-- **Affected NVR**: `nmstate-2.2.60-2.el10_2.x86_64`
+- **Affected NVR**: `nmstate-2.2.60-2.el10_2.x86_64` (tested). Also
+  present in **2.2.62**, the current CentOS Stream 10 build - neither its
+  spec nor its downstream patches touch `hsr`.
 - **Affected RHEL**: 10.2 (expected to affect 9.8+ equally - both ship the
   GA HSR/PRP support; only 10.2 was tested here)
 - **Also present upstream**: yes - `nmstate` default branch (`base`) at
   commit `7e698d62f875f4e885601c8db00be553d8958adb`, checked 2026-10-06.
-  Not a packaging or backport artefact, and not a regression: the offline
-  path appears never to have supported `hsr`.
+  Not a packaging or backport artefact.
+- **Regression**: **no** - see below. This is an incomplete feature, not a
+  break.
+
+### Is this a regression? No - and that is the point
+
+Verified against upstream git history rather than inferred:
+
+- `rust/src/lib/nm/nm_dbus/gen_conf/hsr.rs` has **never existed**, on any
+  branch, in any commit
+  (`git log --all -- rust/src/lib/nm/nm_dbus/gen_conf/hsr.rs` is empty).
+- The string `hsr` has **never appeared in any file** under
+  `nm_dbus/gen_conf/`, in any commit, on any branch
+  (`git log --all -S'hsr' -- rust/src/lib/nm/nm_dbus/gen_conf/` is empty;
+  the same query for `vrf` returns commits, confirming the method).
+- HSR/PRP support was added on **2023-11-20** (`b23da648`, "hsr: add
+  support to HSR/PRP interface") and touched only the live D-Bus path.
+
+So the offline path has never supported `hsr`, from the feature's first
+commit - roughly two years.
+
+**This makes it less alarming and more awkward, not less important.**
+Nobody lost working functionality. But HSR/PRP was subsequently shipped
+**GA in RHEL 10.2** and documented in a customer-facing KB that specifies
+exactly the schema used in the reproducer below - while one of nmstate's
+two ways of applying that schema silently emits a profile NetworkManager
+refuses to load. The gap is between what RHEL states is supported and
+what one supported code path actually does.
+
+Consistent with this, the upstream feature request that asked for HSR/PRP
+(`nmstate/nmstate#2302`, opened 2023-03-30) is **still open** today,
+despite the feature having merged in November 2023.
+
+For completeness: `ipvlan` has the same missing branch in
+`to_keyfile()` - its `ToKeyfile` impl exists in `gen_conf/ipvlan.rs` but
+`conn.rs` never references it. Not tested, mentioned only because a fix
+here should probably sweep it up.
+
+## Classification: this is a bug, not an RFE
+
+Filing this as an enhancement would be the natural reading - `gen_conf`
+never supported `hsr`, so adding it is "new work". **We are asking for it
+to be treated as a defect**, for one practical reason and one substantive
+one.
+
+**Practical**: RFEs land in a future minor release and are not normally
+backported. Classifying this as an enhancement means RHEL 10.2 and 9.8 -
+the releases where HSR/PRP is GA and documented as supported - never
+receive a fix, and every customer following the KB on a current release
+stays broken.
+
+**Substantive**: `nmstatectl gc` accepts a schema-valid state file, exits
+`0`, and writes a file that NetworkManager cannot load. Silent production
+of invalid output is a defect regardless of how the gap arose. The
+feature itself is not missing - HSR/PRP is GA, the schema is documented,
+and the live path implements it correctly. What is broken is one
+serialization path's handling of a supported, documented input.
+
+**Fallback position, if triage disagrees**: even on the strictest reading
+that emitting `[hsr]` is new functionality, *silently discarding a
+configured setting instead of failing* is unambiguously a bug. We would
+rather have the five-line fix, but an error at `gc` time would at least
+make the failure visible instead of surfacing as an unreachable host.
+
+A broader RFE for full HSR/PRP parity across every `nmstate` path, with
+test coverage and documentation, is a reasonable separate item - but it
+should not be the vehicle for this, or the fix misses every shipped
+release.
 
 ## Description
 
@@ -266,6 +334,51 @@ have not been put on a wire.
 We are happy to submit the upstream PR. The fix has to land upstream to
 survive the next rebase; this Jira is for the backport into RHEL.
 
+### Backport path
+
+The fix has to land upstream first or it is dropped at the next rebase -
+the RHEL package tracks upstream releases. But upstream alone ships
+nothing to a customer on 10.2, so the backport is the point of this Jira.
+
+The mechanism already exists in this package and is in active use.
+`nmstate` in CentOS Stream 10 (`c10s`, currently **2.2.62**) carries
+downstream cherry-picks as `git format-patch` files wired into the spec:
+
+```
+Patch0001:      0001-ip-ignore-auto_route_metric-when-ipv6-disabled.patch
+```
+
+`0001-nispor-fix-ipoib-iface-type.patch` is an upstream commit
+(`18fce5de`) carried the same way. So this is routine for the package,
+not a special request.
+
+This change is about as backport-friendly as a patch gets, which should
+keep the regression risk assessment short:
+
+- **Purely additive.** One new file containing a single empty trait impl,
+  one `mod` line, one `if let` block.
+- **No behaviour change for any existing type.** The new branch only fires
+  when `self.hsr` is `Some`, which today can only happen for input that
+  already produces a broken file.
+- **No API, ABI, schema or dependency change.** No new crate, no version
+  bump required.
+- **Failure mode if wrong is visible immediately** - the generated keyfile
+  either gains a correct `[hsr]` section or it does not.
+
+**Ask**: cherry-pick the upstream commit into the z-streams for the
+releases where HSR/PRP is GA - **RHEL 10.2** and **RHEL 9.8** - in
+addition to the next minor via CentOS Stream. Confirm whether 9.8 needs
+it; HSR/PRP is documented as GA from 9.8, but only 10.2 was tested here.
+
+**Business justification for the z-stream** (noting there is no customer
+case): this was found during HSR/PRP enablement testing requested by Red
+Hat Edge product management. HSR/PRP exists for
+substation automation, rail signalling and similar IEC 62439-3 control
+networks; in those deployments PRP is routinely the host's only network,
+which is the topology that fails hardest here. Shipping the capability as
+GA while one documented configuration path silently produces an
+unbootable network configuration is the gap this closes.
+
 ### Verifying a fix
 
 `nmstatectl gc` on the reproducer above emits an `[hsr]` section; the
@@ -306,8 +419,10 @@ Both are expert-level; neither is a long-term answer.
   secondary-interface case. Flagged for triage rather than asserted -
   adjust to whatever the HSR/PRP support commitment warrants.
 - **Priority**: defer to triage.
-- **Fix version**: RHEL 10 z-stream, given HSR/PRP is GA in 10.2. Worth
-  checking whether 9.8+ needs the same backport.
+- **Type**: Bug, not Enhancement - see Classification above. This is the
+  field that decides whether 10.2 and 9.8 ever get a fix.
+- **Fix version**: next RHEL 10 minor via CentOS Stream, **plus z-stream
+  for 10.2 and 9.8**. See Backport path.
 - **Links**: upstream GitHub PR once filed; the OCPBUGS items below.
 
 ---
