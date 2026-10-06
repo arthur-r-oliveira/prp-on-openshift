@@ -71,11 +71,44 @@ path is fine.
 Also checked against the current `base` branch (upstream default branch,
 HEAD `7e698d62f875f4e885601c8db00be553d8958adb` as of 2026-10-06): the same
 gap is present there too, so this isn't a regression that's already been
-fixed and just hasn't shipped yet. From reading the tree it looks like
-`gen_conf` support for `hsr` was never implemented in the first place,
-rather than added and later broken - but I haven't verified the per-PR
-history myself, so I'd defer to maintainers on whether some earlier
-change was expected to have covered it.
+fixed and just hasn't shipped yet.
+
+Not a regression at all, in fact - `gen_conf` support for `hsr` was never
+implemented, rather than added and later broken. Checked against history
+rather than inferred from the tree:
+
+```console
+$ git log --all -- rust/src/lib/nm/nm_dbus/gen_conf/hsr.rs
+                                  # empty: the file has never existed
+
+$ git log --all -S'hsr' -- rust/src/lib/nm/nm_dbus/gen_conf/
+                                  # empty: 'hsr' has never appeared in any
+                                  # file under gen_conf/, in any commit
+
+$ git log --all -S'vrf' -- rust/src/lib/nm/nm_dbus/gen_conf/
+c9fea9ed rust: Sync with base branch a9cee09...
+592d24d0 rust: Conditional compiling by cargo feature
+                                  # control: same query, a type that IS wired up
+```
+
+Every commit touching HSR under `rust/src/lib/nm/` stayed on the D-Bus
+side: `b23da648` (2023-11-20, the original "hsr: add support to HSR/PRP
+interface"), `ea255551` (HSRv1/2012), `e7481ab9` (`interlink`), plus
+`19e60c17` and `9787cfc9` (reapply/reactivate fixes). None of them added
+anything under `gen_conf/`. So the offline path has been missing `hsr`
+since the feature's first commit, about two years.
+
+If `gen_conf` coverage was deliberately out of scope for that work, that
+would be useful to know and I'll happily drop this - but I couldn't find
+a note to that effect in the source, the CHANGELOG, or those commits.
+
+Possibly related: the original feature request for HSR/PRP (#2302, opened
+2023-03-30) is still open, despite the feature merging in November 2023.
+
+`ipvlan` looks like the same omission: `gen_conf/ipvlan.rs` exists and
+provides the `ToKeyfile` impl, but `conn.rs` never references it, so no
+`[ipvlan]` section can be emitted either. Untested - flagging it in case a
+fix here should cover both.
 
 ### To Reproduce
 

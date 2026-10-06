@@ -38,8 +38,43 @@ nmstatectl gc generates an unloadable NetworkManager keyfile for hsr (HSR/PRP) i
   GA HSR/PRP support; only 10.2 was tested here)
 - **Also present upstream**: yes - `nmstate` default branch (`base`) at
   commit `7e698d62f875f4e885601c8db00be553d8958adb`, checked 2026-10-06.
-  Not a packaging or backport artefact, and not a regression: the offline
-  path appears never to have supported `hsr`.
+  Not a packaging or backport artefact.
+- **Regression**: **no** - see below. This is an incomplete feature, not a
+  break.
+
+### Is this a regression? No - and that is the point
+
+Verified against upstream git history rather than inferred:
+
+- `rust/src/lib/nm/nm_dbus/gen_conf/hsr.rs` has **never existed**, on any
+  branch, in any commit
+  (`git log --all -- rust/src/lib/nm/nm_dbus/gen_conf/hsr.rs` is empty).
+- The string `hsr` has **never appeared in any file** under
+  `nm_dbus/gen_conf/`, in any commit, on any branch
+  (`git log --all -S'hsr' -- rust/src/lib/nm/nm_dbus/gen_conf/` is empty;
+  the same query for `vrf` returns commits, confirming the method).
+- HSR/PRP support was added on **2023-11-20** (`b23da648`, "hsr: add
+  support to HSR/PRP interface") and touched only the live D-Bus path.
+
+So the offline path has never supported `hsr`, from the feature's first
+commit - roughly two years.
+
+**This makes it less alarming and more awkward, not less important.**
+Nobody lost working functionality. But HSR/PRP was subsequently shipped
+**GA in RHEL 10.2** and documented in a customer-facing KB that specifies
+exactly the schema used in the reproducer below - while one of nmstate's
+two ways of applying that schema silently emits a profile NetworkManager
+refuses to load. The gap is between what RHEL states is supported and
+what one supported code path actually does.
+
+Consistent with this, the upstream feature request that asked for HSR/PRP
+(`nmstate/nmstate#2302`, opened 2023-03-30) is **still open** today,
+despite the feature having merged in November 2023.
+
+For completeness: `ipvlan` has the same missing branch in
+`to_keyfile()` - its `ToKeyfile` impl exists in `gen_conf/ipvlan.rs` but
+`conn.rs` never references it. Not tested, mentioned only because a fix
+here should probably sweep it up.
 
 ## Description
 
