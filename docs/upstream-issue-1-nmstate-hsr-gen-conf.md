@@ -1,13 +1,26 @@
-# Upstream issue draft (1 of 2): nmstate/nmstate
+# Upstream issue draft (1 of 3): nmstate/nmstate
 
-**Target**: https://github.com/nmstate/nmstate/issues (primary). A Red Hat
-Bugzilla against the `nmstate` component is a reasonable alternative/mirror
-if that's the preferred internal path instead of, or in addition to, the
-public GitHub issue.
+**Target**: https://github.com/nmstate/nmstate/issues - or a PR directly,
+see "Filing order" below. The Red Hat-internal path is a Jira at
+https://issues.redhat.com, project **RHEL**, component **nmstate** -
+*not* Bugzilla, which is retired for new RHEL product bugs. See
+`rhel-jira-nmstate-hsr-gen-conf.md` for the Jira-shaped version of this
+same report.
+
+**Filing order**: RHEL Jira first, then upstream, then cross-link. The
+Jira is what creates a backport path into a shipped `nmstate` package - an
+upstream merge on its own delivers nothing to RHEL 10.2. But upstream is
+where the code has to land regardless: the RHEL package is a rebase of
+upstream, so a downstream-only fix would be dropped on the next rebase.
+Since the change here is five lines copied from an existing template,
+consider opening a PR rather than an issue and letting the review be the
+conversation.
 
 **Status**: drafted, not filed. This is the root-cause fix target - see
-the companion draft (`upstream-issue-2-agent-based-installer-hsr.md`) for
-the downstream tracking issue against the Agent-Based Installer side.
+`upstream-issue-2-agent-based-installer-hsr.md` for the downstream
+tracking issue against the Agent-Based Installer side, and
+`upstream-issue-3-assisted-installer-agent-hsr-inventory.md` for the
+separate inventory-collector defect.
 
 **Why this one first**: this is where the actual defect lives. Filing here
 gets the real fix moving; the ABI-side issue exists to track *consuming*

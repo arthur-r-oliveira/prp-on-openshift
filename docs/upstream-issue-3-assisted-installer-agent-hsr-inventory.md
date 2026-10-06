@@ -1,12 +1,15 @@
 # Upstream issue draft (3 of 3): assisted-installer-agent
 
 **Target**: `openshift/assisted-installer-agent` on GitHub (the host
-inventory collector), or a Red Hat Bugzilla against the **Assisted
-Installer** component if that's the preferred internal path. This is a
-*different* project from the other two drafts - `nmstate` owns the first
-bug, `assisted-installer-agent` owns this one. `assisted-service` is a
-third, unaffected project here: its own validation logic is correct given
-the data it's handed, so this should not be filed against it.
+inventory collector), or - for the internal path - a Jira at
+https://issues.redhat.com, project **OCPBUGS**, component **Assisted
+Installer**. (Not Bugzilla - retired for new OpenShift product bugs.
+Confirm the exact component string against the project's component list
+before filing.) This is a *different* project from the other two drafts -
+`nmstate` owns the first bug, `assisted-installer-agent` owns this one.
+`assisted-service` is a third, unaffected project here: its own
+validation logic is correct given the data it's handed, so this should
+not be filed against it.
 
 **Status**: drafted, not filed. Found while working around
 `upstream-issue-1-nmstate-hsr-gen-conf.md`'s bug for a topology where
