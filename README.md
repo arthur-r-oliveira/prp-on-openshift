@@ -1,6 +1,8 @@
 # ocp-abi-local-sno
 
 [![SNO test matrix (wipe + single + dual-sidecar-prp)](https://github.com/arthur-r-oliveira/ocp-abi-local-sno/actions/workflows/sno-test-matrix.yml/badge.svg)](https://github.com/arthur-r-oliveira/ocp-abi-local-sno/actions/workflows/sno-test-matrix.yml)
+[![PRP UDP benchmark](https://github.com/arthur-r-oliveira/ocp-abi-local-sno/actions/workflows/prp-bench.yml/badge.svg)](https://github.com/arthur-r-oliveira/ocp-abi-local-sno/actions/workflows/prp-bench.yml)
+[![PRP failover test](https://github.com/arthur-r-oliveira/ocp-abi-local-sno/actions/workflows/prp-test.yml/badge.svg)](https://github.com/arthur-r-oliveira/ocp-abi-local-sno/actions/workflows/prp-test.yml)
 
 **[Test health dashboard](https://arthur-r-oliveira.github.io/ocp-abi-local-sno/)** - pass rate per test type and per run, rebuilt after every CI run.
 
