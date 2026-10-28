@@ -10,6 +10,13 @@
 # host itself, or a self-hosted CI runner with libvirt + SSH access to it),
 # and passwordless SSH (agent or default key) to both nodes as `core`.
 #
+# Without virsh (SNOs on other hypervisors, handed over for Day-2):
+# CUT_METHOD=node takes PRP_LAN_A_IFACE down from inside the node instead.
+# The kernel then sees a carrier loss rather than a silent wire, which is a
+# weaker test of PRP than a hypervisor-side cut, but still proves zero loss
+# through a dead path. Pair with NODE_EXEC=oc-debug (scripts/node-exec.sh)
+# when there is no node SSH key either.
+#
 # All defaults match vars/main.yml's out-of-the-box values - override via
 # env if your deployment customized them (see the block below).
 #
@@ -30,12 +37,16 @@ PRP_B_IP="${PRP_B_IP:-10.10.10.2}"
 PRP_LAN_A_NETWORK="${PRP_LAN_A_NETWORK:-prp-lan-a}"
 KUBECONFIG_A="${KUBECONFIG_A:-/home/libvirt-images/sno-install/sno-a/auth/kubeconfig}"
 KUBECONFIG_B="${KUBECONFIG_B:-/home/libvirt-images/sno-install/sno-b/auth/kubeconfig}"
-SSH_USER="${SSH_USER:-core}"
+NODE_A_HOSTNAME="${NODE_A_HOSTNAME:-sno-a.apps.lab.corp}"
+NODE_B_HOSTNAME="${NODE_B_HOSTNAME:-sno-b.apps.lab.corp}"
+CUT_METHOD="${CUT_METHOD:-virsh}"              # virsh | node
+PRP_LAN_A_IFACE="${PRP_LAN_A_IFACE:-enp6s0}"   # node-side name, CUT_METHOD=node only
 FAILOVER_DURATION="${FAILOVER_DURATION:-20}"  # total ping window, seconds
 CUT_AT="${CUT_AT:-3}"                          # seconds into the window to cut the link
 RESTORE_AT="${RESTORE_AT:-11}"                 # seconds into the window to restore it
 
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes)
+# shellcheck source=node-exec.sh
+. "$(dirname "${BASH_SOURCE[0]}")/node-exec.sh"
 
 PASS=0
 FAIL=0
@@ -77,10 +88,9 @@ done
 echo
 
 # --- 2. prp0 exists and is in true PRP mode on both nodes ---------------
-for pair in "sno-a:$NODE_A_IP" "sno-b:$NODE_B_IP"; do
-  name="${pair%%:*}"
-  ip="${pair#*:}"
-  proto=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" "ip -d link show prp0 2>/dev/null" \
+for side in a b; do
+  name="sno-${side}"
+  proto=$(node_sh "$side" "ip -d link show prp0 2>/dev/null" \
     | grep -o 'proto [0-9]' | awk '{print $2}')
   case "$proto" in
     1) record PASS "prp0-mode:$name" "proto=1 (PRP)" ;;
@@ -92,7 +102,7 @@ echo
 
 # --- 3. Cross-node reachability over prp0 -------------------------------
 ping_log=$(mktemp)
-ssh "${SSH_OPTS[@]}" "$SSH_USER@$NODE_A_IP" "ping -c5 -W2 $PRP_B_IP" > "$ping_log" 2>&1
+node_sh a "ping -c5 -W2 $PRP_B_IP" > "$ping_log" 2>&1
 loss=$(packet_loss_pct "$ping_log")
 if [ "$loss" = "0" ]; then
   record PASS "prp0-reachability" "0% loss, sno-a -> sno-b over prp0"
@@ -103,6 +113,31 @@ rm -f "$ping_log"
 echo
 
 # --- 4. Failover: cut prp-lan-a mid-traffic, expect 0% loss --------------
+if [ "$CUT_METHOD" = node ]; then
+  # Ping and cut share one session on sno-a, so the cut lands exactly
+  # CUT_AT seconds into the ping however slow the session was to start.
+  # The trap brings the port back even if the session is killed mid-cut.
+  # CUT-OK only prints once the kernel reports the port down, so a cut
+  # that silently failed cannot pass as zero loss.
+  ping_log=$(mktemp)
+  node_sh a "ip link show $PRP_LAN_A_IFACE >/dev/null || exit 9
+    trap 'ip link set $PRP_LAN_A_IFACE up' EXIT
+    ping -i 0.2 -w $FAILOVER_DURATION $PRP_B_IP &
+    sleep $CUT_AT; ip link set $PRP_LAN_A_IFACE down
+    ip -br link show $PRP_LAN_A_IFACE | grep -qw DOWN && echo CUT-OK
+    sleep $((RESTORE_AT - CUT_AT)); ip link set $PRP_LAN_A_IFACE up
+    wait" > "$ping_log" 2>&1
+  loss=$(packet_loss_pct "$ping_log")
+  if ! grep -q CUT-OK "$ping_log"; then
+    record FAIL "failover-prp-lan-a" "$PRP_LAN_A_IFACE never went down on sno-a - link was never actually cut"
+  elif [ "$loss" = "0" ]; then
+    record PASS "failover-prp-lan-a" "0% packet loss with $PRP_LAN_A_IFACE down for $((RESTORE_AT - CUT_AT))s"
+  else
+    record FAIL "failover-prp-lan-a" "packet loss=${loss:-unknown}% - $(tail -3 "$ping_log" | tr '\n' ' ')"
+  fi
+  rm -f "$ping_log"
+  mac=""
+else
 # virsh domiflist columns: Interface Type Source Model MAC (5 columns) -
 # the MAC is $5, NOT $4 (that's the Model, e.g. "virtio").
 mac=$(virsh domiflist "$NODE_A_NAME" 2>/dev/null | awk -v net="$PRP_LAN_A_NETWORK" '$3==net {print $5}')
@@ -110,7 +145,7 @@ if [ -z "$mac" ]; then
   record FAIL "failover-prp-lan-a" "could not resolve $NODE_A_NAME's vNIC MAC on $PRP_LAN_A_NETWORK via virsh domiflist"
 else
   ping_log=$(mktemp)
-  ssh "${SSH_OPTS[@]}" "$SSH_USER@$NODE_A_IP" "ping -i 0.2 -w $FAILOVER_DURATION $PRP_B_IP" > "$ping_log" 2>&1 &
+  node_sh a "ping -i 0.2 -w $FAILOVER_DURATION $PRP_B_IP" > "$ping_log" 2>&1 &
   ping_pid=$!
 
   sleep "$CUT_AT"
@@ -136,14 +171,14 @@ if [ -n "${mac:-}" ] && [ -f "$ping_log" ]; then
   fi
   rm -f "$ping_log"
 fi
+fi
 echo
 
 # --- 5. Kernel-level PRP node table shows the peer (per Red Hat's KB on
 #        configuring HSR/PRP with nmstate - not just IP-level reachability) --
-for pair in "sno-a:$NODE_A_IP:$PRP_B_IP" "sno-b:$NODE_B_IP:$PRP_A_IP"; do
-  name="${pair%%:*}"; rest="${pair#*:}"
-  ip="${rest%%:*}"; peer_ip="${rest#*:}"
-  table=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" "sudo cat /sys/kernel/debug/hsr/prp0/node_table 2>/dev/null")
+for side in a b; do
+  name="sno-${side}"
+  table=$(node_sh "$side" "sudo cat /sys/kernel/debug/hsr/prp0/node_table 2>/dev/null")
   # node_table rows list the PEER's MAC, not an IP - just confirm the
   # table has at least one real (non-header) entry.
   entries=$(echo "$table" | grep -c '^[0-9a-f][0-9a-f]:')

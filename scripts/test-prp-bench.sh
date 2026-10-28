@@ -25,6 +25,13 @@
 #
 # Must run on the KVM host: needs oc, virsh, curl, jq, and SSH to both nodes.
 #
+# Without virsh (SNOs on other hypervisors, handed over for Day-2):
+# CUT_METHOD=node cuts from inside sno-a instead, with PRP_LAN_{A,B}_IFACE
+# naming the PRP ports (same names assumed on both nodes). Pair with
+# NODE_EXEC=oc-debug when there is no node SSH key. The receiver-side
+# degraded/recovered assertions are unchanged, so a cut that never took
+# effect still fails.
+#
 # Usage: ./test-prp-bench.sh
 
 set -uo pipefail
@@ -40,7 +47,11 @@ KUBECONFIG_B="${KUBECONFIG_B:-/home/libvirt-images/sno-install/sno-b/auth/kubeco
 PRP_LAN_A_NETWORK="${PRP_LAN_A_NETWORK:-prp-lan-a}"
 PRP_LAN_B_NETWORK="${PRP_LAN_B_NETWORK:-prp-lan-b}"
 MGMT_NETWORK="${MGMT_NETWORK:-ocp-public}"
-SSH_USER="${SSH_USER:-core}"
+NODE_A_HOSTNAME="${NODE_A_HOSTNAME:-sno-a.apps.lab.corp}"
+NODE_B_HOSTNAME="${NODE_B_HOSTNAME:-sno-b.apps.lab.corp}"
+CUT_METHOD="${CUT_METHOD:-virsh}"                 # virsh | node
+PRP_LAN_A_IFACE="${PRP_LAN_A_IFACE:-enp6s0}"      # CUT_METHOD=node only
+PRP_LAN_B_IFACE="${PRP_LAN_B_IFACE:-enp7s0}"
 PRP_BENCH_REPO="${PRP_BENCH_REPO:-$(cd .. 2>/dev/null && pwd)/quarkus-prp-bench}"
 LOG_DIR="${LOG_DIR:-/tmp/sno-test-matrix-logs}"
 
@@ -66,7 +77,8 @@ SETTLE="${SETTLE:-5}"
 RECOVER_WINDOW="${RECOVER_WINDOW:-30}"
 WATCHDOG_TIMEOUT="${WATCHDOG_TIMEOUT:-600}"
 
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes)
+# shellcheck source=node-exec.sh
+. scripts/node-exec.sh
 
 mkdir -p "$LOG_DIR"
 SAMPLES="$LOG_DIR/prp-bench-samples.jsonl"
@@ -75,6 +87,7 @@ SAMPLES="$LOG_DIR/prp-bench-samples.jsonl"
 PASS=0
 FAIL=0
 SAMPLER_PID=""
+CUT_PID=""
 DONE_FLAG="/tmp/prp-bench-watchdog-done.$$"
 WD_PIDFILE="/tmp/prp-bench-watchdog-pid.$$"
 declare -a ALL_LINKS=()
@@ -103,6 +116,13 @@ cleanup() {
   local rc=$?
   trap - EXIT INT TERM
   [ -n "$SAMPLER_PID" ] && kill "$SAMPLER_PID" 2>/dev/null
+  if [ "$CUT_METHOD" = node ]; then
+    # Killing the session deletes its debug pod, whose trap restores both
+    # ports; restore again explicitly in case the pod outlived the client.
+    [ -n "$CUT_PID" ] && kill "$CUT_PID" 2>/dev/null
+    node_sh a "ip link set $PRP_LAN_A_IFACE up; ip link set $PRP_LAN_B_IFACE up" \
+      || echo "[FAIL] prp-bench:link-restore - fix with: ip link set $PRP_LAN_A_IFACE up; ip link set $PRP_LAN_B_IFACE up on sno-a"
+  fi
   for link in "${ALL_LINKS[@]}"; do
     # shellcheck disable=SC2086
     if ! virsh domif-setlink $link up >/dev/null 2>&1; then
@@ -199,6 +219,35 @@ if [ "$BASELINE_AT" -ge "$CUT1_AT" ] || [ "$CUT1_DONE" -gt "$CUT2_AT" ] || [ "$C
 fi
 
 # --- Preflight: resolve vNICs and map them to guest interfaces -------------
+if [ "$CUT_METHOD" = node ]; then
+  # The cut schedule runs on sno-a's clock, so measure how far it sits from
+  # ours and shift the schedule by that, rather than trusting both to be in
+  # NTP sync (a bastion here ran 3s fast with chrony unsynchronised). The
+  # node read lands somewhere inside [before, after]; the midpoint is good to
+  # half that window, far inside SETTLE, and too wide a window fails.
+  before=$(date +%s.%N)
+  node_now=$(node_sh a "date +%s.%N")
+  after=$(date +%s.%N)
+  read -r NODE_OFFSET window < <(awk -v b="$before" -v n="$node_now" -v a="$after" \
+    'BEGIN { if (n == "") exit 1; printf "%d %d\n", n - (a + b) / 2 + (n > (a + b) / 2 ? 0.5 : -0.5), a - b + 0.5 }')
+  if [ -z "${NODE_OFFSET:-}" ] || [ "$window" -gt "$((SETTLE * 2 - 2))" ]; then
+    record FAIL "prp-bench:preflight" "could not measure sno-a clock offset (read=${node_now:-none}, window ${window:-?}s) - cut schedule would drift"
+    echo; echo "== Summary: $PASS passed, $FAIL failed =="
+    exit 1
+  fi
+  echo "sno-a clock offset ${NODE_OFFSET}s (+/- $(( (window + 1) / 2 ))s), cut schedule shifted to match"
+  for side in a b; do
+    if ! node_sh "$side" "ip link show $PRP_LAN_A_IFACE && ip link show $PRP_LAN_B_IFACE" >/dev/null; then
+      record FAIL "prp-bench:preflight" "$PRP_LAN_A_IFACE/$PRP_LAN_B_IFACE missing on sno-$side"
+      echo; echo "== Summary: $PASS passed, $FAIL failed =="
+      exit 1
+    fi
+  done
+  # Restore unconditionally: a previously crashed run may have left one down.
+  node_sh a "ip link set $PRP_LAN_A_IFACE up; ip link set $PRP_LAN_B_IFACE up"
+  trap cleanup EXIT INT TERM
+  IF_A="$PRP_LAN_A_IFACE" IF_B="$PRP_LAN_B_IFACE"
+else
 MAC_A=$(mac_of "$NODE_A_NAME" "$PRP_LAN_A_NETWORK")
 MAC_B=$(mac_of "$NODE_A_NAME" "$PRP_LAN_B_NETWORK")
 MAC_MGMT=$(mac_of "$NODE_A_NAME" "$MGMT_NETWORK")
@@ -242,6 +291,7 @@ if [ -z "$IF_A" ] || [ -z "$IF_B" ]; then
   record FAIL "prp-bench:preflight" "could not map PRP vNIC MACs to guest interfaces on $NODE_B_NAME via permaddr"
   echo; echo "== Summary: $PASS passed, $FAIL failed =="
   exit 1
+fi
 fi
 record PASS "prp-bench:preflight" "${PRP_LAN_A_NETWORK}=${IF_A} ${PRP_LAN_B_NETWORK}=${IF_B} on $NODE_B_NAME"
 
@@ -339,6 +389,21 @@ record PASS "prp-bench:start" "run started at ${RATE} msg/s for ${DURATION}s"
 
 sampler & SAMPLER_PID=$!
 
+# Node-side cuts: one session runs the whole schedule on sno-a's own clock,
+# so debug-pod startup latency cannot smear the cut windows. Its trap brings
+# both ports back on any exit, and if this script dies the session still
+# runs to the end of the schedule - it is its own watchdog.
+if [ "$CUT_METHOD" = node ]; then
+  at() { echo "until [ \$(date +%s) -ge $((T0 + NODE_OFFSET + $1)) ]; do sleep 0.2; done"; }
+  node_sh a "trap 'ip link set $IF_A up; ip link set $IF_B up' EXIT INT TERM HUP
+    $(at "$CUT1_AT"); ip link set $IF_A down; echo cut1 \$(date +%s)
+    $(at "$((CUT1_AT + CUT_LEN))"); ip link set $IF_A up; echo restore1 \$(date +%s)
+    $(at "$CUT2_AT"); ip link set $IF_B down; echo cut2 \$(date +%s)
+    $(at "$((CUT2_AT + CUT_LEN))"); ip link set $IF_B up; echo restore2 \$(date +%s)" \
+    > "$LOG_DIR/prp-bench-cuts.log" 2>&1 &
+  CUT_PID=$!
+fi
+
 RCVBUF_START=$(curl -sf --max-time 5 "http://$NODE_B_IP:8080/api/stats" 2>/dev/null \
   | jq -r '.host.udpRcvbufErrors // 0')
 
@@ -365,10 +430,10 @@ fi
 # --- Cut 1: LAN A ----------------------------------------------------------
 wait_until "$CUT1_AT"
 echo "t+${CUT1_AT}s: cutting ${PRP_LAN_A_NETWORK} on ${NODE_A_NAME}"
-virsh domif-setlink "$NODE_A_NAME" "$MAC_A" down >/dev/null 2>&1
+[ "$CUT_METHOD" = virsh ] && virsh domif-setlink "$NODE_A_NAME" "$MAC_A" down >/dev/null 2>&1
 
 wait_until "$((CUT1_AT + CUT_LEN))"
-virsh domif-setlink "$NODE_A_NAME" "$MAC_A" up >/dev/null 2>&1
+[ "$CUT_METHOD" = virsh ] && virsh domif-setlink "$NODE_A_NAME" "$MAC_A" up >/dev/null 2>&1
 echo "t+$((CUT1_AT + CUT_LEN))s: restored ${PRP_LAN_A_NETWORK}"
 
 n=$(degraded_count "$IF_A" "$((CUT1_AT + SETTLE))" "$((CUT1_AT + CUT_LEN))")
@@ -385,10 +450,10 @@ n=$(recovered_count "$((CUT1_AT + CUT_LEN + SETTLE))" "$((CUT1_AT + CUT_LEN + SE
 # --- Cut 2: LAN B ----------------------------------------------------------
 wait_until "$CUT2_AT"
 echo "t+${CUT2_AT}s: cutting ${PRP_LAN_B_NETWORK} on ${NODE_A_NAME}"
-virsh domif-setlink "$NODE_A_NAME" "$MAC_B" down >/dev/null 2>&1
+[ "$CUT_METHOD" = virsh ] && virsh domif-setlink "$NODE_A_NAME" "$MAC_B" down >/dev/null 2>&1
 
 wait_until "$((CUT2_AT + CUT_LEN))"
-virsh domif-setlink "$NODE_A_NAME" "$MAC_B" up >/dev/null 2>&1
+[ "$CUT_METHOD" = virsh ] && virsh domif-setlink "$NODE_A_NAME" "$MAC_B" up >/dev/null 2>&1
 echo "t+$((CUT2_AT + CUT_LEN))s: restored ${PRP_LAN_B_NETWORK}"
 
 n=$(degraded_count "$IF_B" "$((CUT2_AT + SETTLE))" "$((CUT2_AT + CUT_LEN))")
@@ -447,6 +512,11 @@ drops=$((rcvbuf_end - ${RCVBUF_START:-0}))
 record PASS "prp-bench:latency" "$(printf '%s' "$tx" | jq -r \
   '"RTT p50 \(.rtt.p50)us p99 \(.rtt.p99)us p99.9 \(.rtt.p999)us"') / $(printf '%s' "$rx" | jq -r \
   '"jitter p50 \(.jitter.p50)us p99 \(.jitter.p99)us, throughput \(.throughputMbps) Mbps"')"
+
+if [ "$CUT_METHOD" = node ]; then
+  wait "$CUT_PID" 2>/dev/null; CUT_PID=""
+  echo "node-side cut schedule (sno-a epoch, T0=$((T0 + NODE_OFFSET))): $(tr '\n' ' ' < "$LOG_DIR/prp-bench-cuts.log")"
+fi
 
 echo
 echo "Samples: $SAMPLES"
