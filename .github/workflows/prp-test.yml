@@ -7,16 +7,21 @@ on:
 
 jobs:
   prp-failover:
-    runs-on: [self-hosted, kvm-prp-lab]
-    timeout-minutes: 10
+    # Which lab to test is a repository variable, so pointing CI at another
+    # SNO pair is a settings change, not a commit. Site specifics (kubeconfig
+    # paths, node names, NIC names, NODE_EXEC/CUT_METHOD) live in that
+    # runner's .env file, never in this public repo.
+    runs-on: ${{ fromJSON(vars.PRP_RUNNER_LABELS || '["self-hosted","kvm-prp-lab"]') }}
+    # oc-debug node access costs ~10s per call, so allow for the slow path.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       - name: Collect cluster info
         id: info
         run: |
-          KUBECONFIG_A="/home/libvirt-images/sno-install/sno-a/auth/kubeconfig"
-          KUBECONFIG_B="/home/libvirt-images/sno-install/sno-b/auth/kubeconfig"
+          KUBECONFIG_A="${KUBECONFIG_A:-/home/libvirt-images/sno-install/sno-a/auth/kubeconfig}"
+          KUBECONFIG_B="${KUBECONFIG_B:-/home/libvirt-images/sno-install/sno-b/auth/kubeconfig}"
 
           OCP_VERSION_A=$(KUBECONFIG="$KUBECONFIG_A" oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || echo "unknown")
           OCP_VERSION_B=$(KUBECONFIG="$KUBECONFIG_B" oc get clusterversion version -o jsonpath='{.status.desired.version}' 2>/dev/null || echo "unknown")
@@ -85,7 +90,7 @@ jobs:
             done < "$LOG"
             echo ""
             echo "---"
-            echo "_Runner: \`kvm-prp-lab\` | $(date -u '+%Y-%m-%d %H:%M UTC')_"
+            echo "_Runner: \`${{ runner.name }}\` | $(date -u '+%Y-%m-%d %H:%M UTC')_"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload test results

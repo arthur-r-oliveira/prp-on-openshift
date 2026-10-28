@@ -506,7 +506,9 @@ not a dead end.
   (`ip link set down dev enp7s0`) tests NetworkManager/kernel behavior
   from inside the guest. This repo's `virsh domif-setlink ... down` cuts
   the link from outside the guest entirely - strictly a superset of what
-  the KB's test proves, not a substitute that's weaker in some way.
+  the KB's test proves, not a substitute that's weaker in some way. On
+  hypervisors without `virsh`, `CUT_METHOD=node` falls back to exactly the
+  KB's guest-level `ip link set down`, run through `oc debug node/...`.
 - **`multicast-spec: 0` vs. the KB's example value of `40`.** Arbitrary in
   both cases; it only has to match across every node in the same PRP
   group, which it does here (`sno-a` and `sno-b` both use `0`).
@@ -536,9 +538,10 @@ vars if needed (`NODE_A_IP`, `KUBECONFIG_A`, `RATE`, `DURATION`, ...).
 `PRP_BENCH_REPO` (it defaults to `../quarkus-prp-bench`, a sibling of this
 one) so it can apply the manifests itself. If the repo is absent **and** the
 app is not already deployed, it aborts immediately rather than reporting a
-cascade of unrelated readiness failures. It also needs `jq` on the KVM host,
+cascade of unrelated readiness failures. It also needs `jq` (1.6 or newer),
 and is safe to interrupt: a detached watchdog restores both links even on
-`SIGKILL`, where a shell trap cannot run.
+`SIGKILL`, where a shell trap cannot run (with `CUT_METHOD=node`, the node
+session running the cut schedule restores them itself).
 
 In CI these are three separate workflows, so each reports as its own suite:
 

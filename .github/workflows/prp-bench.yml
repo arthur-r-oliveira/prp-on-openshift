@@ -36,7 +36,9 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
-    runs-on: [self-hosted, kvm-prp-lab]
+    # Runner (and so lab) chosen by repository variable; site values come
+    # from that runner's .env (see prp-test.yml).
+    runs-on: ${{ fromJSON(vars.PRP_RUNNER_LABELS || '["self-hosted","kvm-prp-lab"]') }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -107,7 +109,7 @@ jobs:
             done < "$LOG"
             echo ""
             echo "---"
-            echo "_Runner: \`kvm-prp-lab\` | $(date -u '+%Y-%m-%d %H:%M UTC')_"
+            echo "_Runner: \`${{ runner.name }}\` | $(date -u '+%Y-%m-%d %H:%M UTC')_"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload results
@@ -118,4 +120,5 @@ jobs:
           path: |
             ${{ runner.temp }}/test-results/
             /tmp/sno-test-matrix-logs/prp-bench-samples.jsonl
+            /tmp/sno-test-matrix-logs/prp-bench-cuts.log
           retention-days: 90
