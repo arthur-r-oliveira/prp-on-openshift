@@ -1,0 +1,42 @@
+name: PRP Day-2 configuration
+
+# Day-2 only: NMState operator, hsr autoload MachineConfig and the prp0 NNCPs
+# on an SNO pair that is already installed - by the matrix, or by anyone
+# else. Manual, because it reboots both nodes (the MachineConfig) and
+# rewrites their PRP networking.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# Never reconfigure the nodes while a failover test or benchmark is cutting
+# their links.
+concurrency:
+  group: prp-bench
+  cancel-in-progress: false
+
+jobs:
+  day2:
+    # Same runner selection as the failover test; site values come from the
+    # runner's .env (see prp-test.yml).
+    runs-on: ${{ fromJSON(vars.PRP_RUNNER_LABELS || '["self-hosted","kvm-prp-lab"]') }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Apply Day-2 PRP configuration
+        env:
+          MIRROR_REGISTRY_HOST: ${{ secrets.MIRROR_REGISTRY_HOST }}
+        run: |
+          mkdir -p "${{ runner.temp }}/day2"
+          ./scripts/apply-day2-prp.sh 2>&1 | tee "${{ runner.temp }}/day2/apply-day2-prp.log"
+          exit ${PIPESTATUS[0]}
+
+      - name: Upload log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: prp-day2-log
+          path: ${{ runner.temp }}/day2/
+          retention-days: 90

@@ -9,12 +9,21 @@ the lab, so the dashboard never carries a site-specific hostname.
 Output is one self-contained HTML file: no network fetches, no build step, no
 framework. It opens from a file:// URL as readily as from Pages.
 
+--offline also embeds every run's artifact files (logs, JUnit, bench samples)
+in that one file, so the result can be attached to Slack or Jira and read
+after the lab is gone and the GitHub artifacts have expired (90 days). It is
+opt-in so the published Pages build stays small. Write it under site/ (which
+is gitignored) and skim the logs before sharing: they come straight off the
+lab host.
+
 Usage: ./scripts/build-dashboard.py [--out site/index.html] [--limit 100]
+                                    [--offline]
 """
 
 import argparse
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -32,6 +41,39 @@ WORKFLOW_LABELS = {
 }
 
 
+# Per-file cap for --offline. Current artifacts are well under 100 KB each;
+# this only stops one runaway log from bloating the attachment. The tail is
+# kept, since that is where a failure shows up.
+FILE_CAP = 1024 * 1024
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def read_artifact(path, root):
+    raw = path.read_bytes()
+    if b"\0" in raw[:8192]:
+        return None  # binary; nothing readable to embed
+    truncated = len(raw) > FILE_CAP
+    text = raw[-FILE_CAP:].decode("utf-8", errors="replace")
+    return {
+        "path": str(path.relative_to(root)),
+        "size": len(raw),
+        "truncated": truncated,
+        "text": ANSI.sub("", text).replace("\r\n", "\n"),
+    }
+
+
+def case_note(case):
+    """Failure/error text, else stdout - the 'why' behind a cell."""
+    for tag in ("failure", "error", "system-out"):
+        el = case.find(tag)
+        if el is not None:
+            parts = [el.get("message") if tag != "system-out" else None,
+                     (el.text or "").strip()]
+            note = " - ".join(p for p in parts if p)
+            return note[:500]
+    return ""
+
+
 def gh(*args, check=True):
     r = subprocess.run(["gh", *args], capture_output=True, text=True)
     if check and r.returncode != 0:
@@ -39,15 +81,17 @@ def gh(*args, check=True):
     return r.stdout
 
 
-def collect(limit):
-    """Returns (runs, records). A run with no parsable artifact is skipped."""
+def collect(limit, keep_files=False):
+    """Returns (runs, records, files). A run with no parsable artifact is
+    skipped. files maps run id -> embedded artifacts, filled only when
+    keep_files is set."""
     raw = gh(
         "run", "list", "--limit", str(limit), "--json",
         "databaseId,createdAt,conclusion,workflowName,headSha,url",
     )
     runs_meta = {str(r["databaseId"]): r for r in json.loads(raw)}
 
-    runs, records = [], []
+    runs, records, files = [], [], {}
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="dashboard-"))
     try:
         for rid, meta in runs_meta.items():
@@ -74,6 +118,7 @@ def collect(limit):
                             "run": rid,
                             "test": case.get("name"),
                             "ok": not bad,
+                            "note": case_note(case),
                         })
                         found = True
             if found:
@@ -86,15 +131,23 @@ def collect(limit):
                     "label": WORKFLOW_LABELS.get(wf, wf),
                     "sha": meta["headSha"][:7],
                     "url": meta["url"],
+                    "conclusion": meta["conclusion"] or "unknown",
                 })
+                if keep_files:
+                    files[rid] = [
+                        f for f in (read_artifact(p, dest)
+                                    for p in sorted(dest.rglob("*"))
+                                    if p.is_file())
+                        if f
+                    ]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
     runs.sort(key=lambda r: r["at"])
-    return runs, records
+    return runs, records, files
 
 
-def aggregate(runs, records):
+def aggregate(runs, records, files):
     order = {r["id"]: i for i, r in enumerate(runs)}
     records = [r for r in records if r["run"] in order]
 
@@ -123,6 +176,7 @@ def aggregate(runs, records):
         run["rate"] = round(100 * b["pass"] / b["total"], 1) if b["total"] else 0
 
     cells = {f"{r['run']}|{r['test']}": r["ok"] for r in records}
+    notes = {f"{r['run']}|{r['test']}": r["note"] for r in records if r["note"]}
 
     total = len(records)
     passed = sum(r["ok"] for r in records)
@@ -140,6 +194,9 @@ def aggregate(runs, records):
         "runs": runs,
         "tests": tests,
         "cells": cells,
+        "notes": notes,
+        "files": files,
+        "offline": bool(files),
         "totals": {
             "records": total,
             "passed": passed,
@@ -264,6 +321,30 @@ HTML = """<!DOCTYPE html>
   .tsub:first-of-type { margin-top: 0; }
   .hidden { display: none; }
 
+  /* Offline artifact browser. Logs render lazily on first open, so a page
+     with sixty runs of logs still loads instantly. */
+  details.run { border-top: 1px solid var(--grid); }
+  details.run:first-of-type { border-top: 0; }
+  details.run > summary { cursor: pointer; padding: 10px 2px; font-size: 13px; list-style-position: outside; }
+  details.run > summary .meta { color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+  details.run[open] > summary { font-weight: 600; }
+  details.run:target > summary { background: var(--grid); border-radius: 6px; }
+  .runbody { padding: 0 0 14px 18px; font-size: 12px; }
+  .runbody ul.fails { margin: 4px 0 12px; padding-left: 18px; }
+  .runbody ul.fails li { margin: 3px 0; }
+  .runbody code, .runbody pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  details.file { margin: 4px 0; }
+  details.file > summary { cursor: pointer; color: var(--text-secondary); }
+  details.file > summary button { margin-left: 8px; padding: 2px 8px; }
+  pre.log {
+    background: var(--plane); border: 1px solid var(--grid); border-radius: 6px;
+    padding: 10px; margin: 6px 0 10px; max-height: 420px; overflow: auto;
+    font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-all;
+  }
+  .badge { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); margin-left: 6px; }
+  .badge.fail { color: var(--critical); border-color: var(--critical); }
+  .badge.ok { color: var(--good); border-color: var(--good); }
+
   #tip {
     position: fixed; pointer-events: none; opacity: 0; transition: opacity .09s;
     background: var(--surface-1); color: var(--text-primary);
@@ -325,6 +406,13 @@ HTML = """<!DOCTYPE html>
       <span><i class="swatch" style="background:var(--grid)"></i> not run</span>
     </div>
     <div id="matrix" class="scroll-x"></div>
+  </section>
+
+  <section class="card hidden" id="artifactsCard">
+    <h2>Run artifacts</h2>
+    <p class="cap">Every file each CI run uploaded, embedded in this page - it works without the lab or GitHub.
+      Newest first. Click a cell in the matrix above to jump to its run.</p>
+    <div id="artifacts"></div>
   </section>
 
   <section class="card hidden" id="tableCard">
@@ -565,8 +653,16 @@ function matrix() {
         gl.textContent = ok ? '✓' : '✗';
         g.appendChild(gl);
       }
+      const note = D.notes[key];
       hoverable(g, `<b>${esc(t)}</b><br>${esc(run.label)} · ${esc(run.date)}` +
-                   `<br>${has ? (ok ? '✓ passed' : '✗ failed') : 'not run in this suite'}`);
+                   `<br>${has ? (ok ? '✓ passed' : '✗ failed') : 'not run in this suite'}` +
+                   (note ? `<br><span class="mono">${esc(note.slice(0, 240))}</span>` : '') +
+                   (D.offline && has ? '<br><i>click for run artifacts</i>' : ''));
+      if (D.offline && has) {
+        g.style.cursor = 'pointer';
+        g.addEventListener('click', () => openRun(run.id));
+        g.addEventListener('keydown', e => { if (e.key === 'Enter') openRun(run.id); });
+      }
       svg.appendChild(g);
     });
   });
@@ -588,7 +684,7 @@ function table() {
     `<tr><td>${esc(t.test)}</td><td class="num">${t.pass}</td>` +
     `<td class="num">${t.total}</td><td class="num">${t.rate}%</td></tr>`).join('');
   const runRows = D.runs.map(r =>
-    `<tr><td><a href="${esc(r.url)}">${esc(r.label)}</a></td><td>${esc(r.date)}</td>` +
+    `<tr><td><a href="${D.offline ? '#run-' + esc(r.id) : esc(r.url)}">${esc(r.label)}</a></td><td>${esc(r.date)}</td>` +
     `<td>${esc(r.sha)}</td><td class="num">${r.pass}</td><td class="num">${r.total}</td>` +
     `<td class="num">${r.rate}%</td></tr>`).join('');
   document.getElementById('tblTests').innerHTML =
@@ -599,10 +695,90 @@ function table() {
     `<tbody>${runRows}</tbody>`;
 }
 
+/* ------------- Offline artifact browser ------------- */
+function fmtSize(n) {
+  return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB'
+                                           : (n / 1048576).toFixed(1) + ' MB';
+}
+
+function download(name, text) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], {type: 'text/plain'}));
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function openRun(id) {
+  const el = document.getElementById('run-' + id);
+  if (!el) return;
+  el.open = true;
+  location.hash = 'run-' + id;
+  el.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+
+function artifacts() {
+  document.getElementById('artifactsCard').classList.remove('hidden');
+  const host = document.getElementById('artifacts');
+  [...D.runs].reverse().forEach(run => {
+    const files = D.files[run.id] || [];
+    const fails = D.tests.map(t => t.test)
+      .filter(t => D.cells[run.id + '|' + t] === false);
+    const d = document.createElement('details');
+    d.className = 'run';
+    d.id = 'run-' + run.id;
+    const green = run.total && run.pass === run.total;
+    d.innerHTML =
+      `<summary>${esc(run.label)} <span class="meta">· ${esc(run.at.replace('T', ' ').replace('Z', ' UTC'))}` +
+      ` · ${esc(run.sha)} · ${run.pass}/${run.total} passed</span>` +
+      `<span class="badge ${green ? 'ok' : 'fail'}">${green ? '✓ green' : '✗ ' + fails.length + ' failed'}</span>` +
+      `<span class="badge">job: ${esc(run.conclusion)}</span></summary>` +
+      `<div class="runbody"></div>`;
+    d.addEventListener('toggle', () => {
+      if (!d.open || d.dataset.built) return;
+      d.dataset.built = '1';
+      const body = d.querySelector('.runbody');
+      let html = `<p>GitHub run <a href="${esc(run.url)}">${esc(run.id)}</a> ` +
+                 `(the link and its artifacts may have expired - everything below is a copy).</p>`;
+      if (fails.length) {
+        html += '<b>Failed tests</b><ul class="fails">' + fails.map(t => {
+          const n = D.notes[run.id + '|' + t];
+          return `<li><code>${esc(t)}</code>${n ? ' - ' + esc(n) : ''}</li>`;
+        }).join('') + '</ul>';
+      }
+      html += `<b>Artifacts (${files.length})</b>`;
+      body.innerHTML = html;
+      files.forEach(f => {
+        const fd = document.createElement('details');
+        fd.className = 'file';
+        fd.innerHTML = `<summary><code>${esc(f.path)}</code> · ${fmtSize(f.size)}` +
+                       (f.truncated ? ' · <i>truncated, last 1 MB kept</i>' : '') +
+                       ` <button class="ctl">Download</button></summary>`;
+        fd.querySelector('button').addEventListener('click', e => {
+          e.preventDefault();
+          download(`${run.id}-${f.path.split('/').pop()}`, f.text);
+        });
+        fd.addEventListener('toggle', () => {
+          if (!fd.open || fd.querySelector('pre')) return;
+          const pre = document.createElement('pre');
+          pre.className = 'log';
+          pre.textContent = f.text;
+          fd.appendChild(pre);
+        });
+        body.appendChild(fd);
+      });
+    });
+    host.appendChild(d);
+  });
+  if (location.hash.startsWith('#run-')) openRun(location.hash.slice(5));
+}
+
 kpis(); bars(); line(); matrix(); table();
+if (D.offline) artifacts();
 
 document.getElementById('foot').innerHTML =
   `Generated ${esc(D.generated)} from GitHub Actions JUnit artifacts. ` +
+  (D.offline ? 'Offline snapshot: all run artifacts are embedded in this file. ' : '') +
   `Only CI runs appear here - runs executed by hand on the lab host are not collected.`;
 
 const tableBtn = document.getElementById('tableBtn');
@@ -627,12 +803,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="site/index.html")
     ap.add_argument("--limit", type=int, default=100)
+    ap.add_argument("--offline", action="store_true",
+                    help="embed every run's artifact files for sharing")
     args = ap.parse_args()
 
-    runs, records = collect(args.limit)
+    runs, records, files = collect(args.limit, keep_files=args.offline)
     if not runs:
         sys.exit("no runs with parsable JUnit artifacts found")
-    data = aggregate(runs, records)
+    data = aggregate(runs, records, files)
 
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -642,7 +820,8 @@ def main():
 
     t = data["totals"]
     print(f"wrote {out}  ({t['runs']} runs, {t['records']} executions, "
-          f"{t['types']} test types, {t['rate']}% overall)")
+          f"{t['types']} test types, {t['rate']}% overall, "
+          f"{out.stat().st_size / 1024:.0f} KB)")
 
 
 if __name__ == "__main__":

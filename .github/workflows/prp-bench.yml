@@ -3,7 +3,11 @@ name: PRP UDP benchmark
 # Chains off the matrix rather than living inside it: the matrix finishes by
 # leaving dual-sidecar-prp running, which is exactly the state this needs. Also
 # runnable on its own against whatever is already up - the clusters usually are.
+# The daily schedule covers labs that never run the matrix (SNOs installed
+# elsewhere, Day-2 only); 07:00 UTC keeps clear of the 06:00 failover test.
 on:
+  schedule:
+    - cron: "0 7 * * *"
   workflow_run:
     workflows: ["SNO test matrix (wipe + single + dual-sidecar-prp)"]
     types: [completed]
@@ -32,11 +36,13 @@ jobs:
   bench:
     # A failed matrix usually means no healthy clusters to benchmark, so skip
     # rather than report a cascade of failures that say nothing about PRP.
-    # A manual dispatch always runs.
+    # A manual dispatch or a scheduled run always runs.
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      github.event_name != 'workflow_run' ||
       github.event.workflow_run.conclusion == 'success'
-    runs-on: [self-hosted, kvm-prp-lab]
+    # Runner (and so lab) chosen by repository variable; site values come
+    # from that runner's .env (see prp-test.yml).
+    runs-on: ${{ fromJSON(vars.PRP_RUNNER_LABELS || '["self-hosted","kvm-prp-lab"]') }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -107,7 +113,7 @@ jobs:
             done < "$LOG"
             echo ""
             echo "---"
-            echo "_Runner: \`kvm-prp-lab\` | $(date -u '+%Y-%m-%d %H:%M UTC')_"
+            echo "_Runner: \`${{ runner.name }}\` | $(date -u '+%Y-%m-%d %H:%M UTC')_"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload results
@@ -118,4 +124,5 @@ jobs:
           path: |
             ${{ runner.temp }}/test-results/
             /tmp/sno-test-matrix-logs/prp-bench-samples.jsonl
+            /tmp/sno-test-matrix-logs/prp-bench-cuts.log
           retention-days: 90

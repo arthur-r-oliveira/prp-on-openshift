@@ -83,9 +83,11 @@ network layout, and which of the Day-0/Day-2 workarounds below apply.
 | `templates/vm-definition/*.xml.j2`, `templates/agent-config/*.yaml.j2` | Per-topology libvirt domain XML and `agent-config.yaml` - one pair per topology, not one file with conditionals throughout |
 | `day2-manifests/` | Applied **after** `install-complete`, once per cluster (dual-sidecar-prp only) - installs NMState and configures `prp0` via `NodeNetworkConfigurationPolicy`. Driven by `scripts/apply-day2-prp.sh`, not applied by hand and not part of the ansible run; see docs/prp-test-case.md for why this has to be Day-2. `kubernetes-nmstate-operator` is **absent from every default OCP 5.0 catalog** (present in v4.17-v4.22, not v5.0), so the script tries three sources in order: default catalogs, then the mirror registry's pruned v4.22 index (`00-nmstate-catalogsource.yaml`), then upstream kubernetes-nmstate from GitHub. It picks whichever works, so no edit is needed once Red Hat republishes the operator |
 | `day0-manifests/` | Delivered before first boot, two different ways for two different needs - see docs/spec-test-case-3-prp-primary.md's "Update" section for why they're not interchangeable: `99-hsr-module-autoload.yaml.j2` is a real Day-0-extra-manifest (MachineConfig, applied Day-1 by MCO once a cluster exists); `prp0.nmconnection.j2` is plain keyfile content merged straight into the ISO's own Ignition config via `scripts/embed-day0-file.py` (applies pre-boot, which extra manifests don't) |
-| `scripts/` | `add-cluster-hosts.sh` (per-node `/etc/hosts` entries), `prp-lab-tunnel.sh` (an `sshuttle` tunnel scoped to `ocp-public` only, for reaching the VMs from a workstation that isn't the KVM host), `wipe-all-sno.sh` (destroys/undefines every VM this repo can create, across every topology - a clean slate), `apply-day2-prp.sh` (the whole Day-2 sequence: NMState via the three-tier source fallback, then the NNCPs, then verify `prp0`), `test-single.sh` / `test-prp-failover.sh` / `test-prp-bench.sh` (per-topology checks - see "Testing" below), `run-test-matrix.sh` (the CI entry point), `mirror-nmstate-operator.sh` (builds and pushes the pruned v4.22 catalog index to the mirror registry - re-run when that index updates), `to-junit-xml.sh` (turns `[PASS]`/`[FAIL]` lines into JUnit XML for CI), and `embed-day0-file.py` (merges a file into an ISO's real Ignition config - the single-primary-prp workaround's actual mechanism) |
+| `scripts/` | `add-cluster-hosts.sh` (per-node `/etc/hosts` entries), `prp-lab-tunnel.sh` (an `sshuttle` tunnel scoped to `ocp-public` only, for reaching the VMs from a workstation that isn't the KVM host), `wipe-all-sno.sh` (destroys/undefines every VM this repo can create, across every topology - a clean slate), `node-exec.sh` (sourced helper: run a command on either node over `ssh`, or via `oc debug node/...` with `NODE_EXEC=oc-debug`), `apply-day2-prp.sh` (the whole Day-2 sequence: NMState via the three-tier source fallback, then the NNCPs, then verify `prp0`), `test-single.sh` / `test-prp-failover.sh` / `test-prp-bench.sh` (per-topology checks - see "Testing" below), `run-test-matrix.sh` (the CI entry point), `mirror-nmstate-operator.sh` (builds and pushes the pruned v4.22 catalog index to the mirror registry - re-run when that index updates), `to-junit-xml.sh` (turns `[PASS]`/`[FAIL]` lines into JUnit XML for CI), and `embed-day0-file.py` (merges a file into an ISO's real Ignition config - the single-primary-prp workaround's actual mechanism) |
 | `.github/workflows/prp-test.yml` | Runs `test-prp-failover.sh` against an **already-deployed** dual-sidecar-prp cluster - an ongoing health check, not a deploy |
-| `.github/workflows/sno-test-matrix.yml` | Runs `run-test-matrix.sh`: wipes everything, then deploys and tests Test Case 1 and Test Case 2 from scratch, wiping between them but **not** at the end. Test Case 2's two nodes install sequentially, not in parallel - see "Testing" below. Both workflows need a self-hosted runner registered on the KVM host (label `kvm-prp-lab`) - can't run on GitHub's hosted runners, this needs real `virsh`/SSH access to the VMs |
+| `.github/workflows/prp-bench.yml` | Runs `test-prp-bench.sh` (UDP load under two link cuts) after a successful matrix, or on demand against what is already up |
+| `.github/workflows/prp-day2.yml` | Manual only: runs `apply-day2-prp.sh` against an already-installed SNO pair (reboots both nodes) |
+| `.github/workflows/sno-test-matrix.yml` | Runs `run-test-matrix.sh`: wipes everything, then deploys and tests Test Case 1 and Test Case 2 from scratch, wiping between them but **not** at the end. Test Case 2's two nodes install sequentially, not in parallel - see "Testing" below. Both workflows need a self-hosted runner registered on the KVM host (label `kvm-prp-lab`); the failover, benchmark and Day-2 workflows instead follow the repository variable `PRP_RUNNER_LABELS` when set (see "Day-2 only, on SNOs installed elsewhere") - can't run on GitHub's hosted runners, this needs real `virsh`/SSH access to the VMs |
 | `docs/` | The real documentation - read this, not this file |
 
 ## Quick start
@@ -110,6 +112,41 @@ and the `hsr` module MachineConfig, waits out the MCO reboot, and verifies
 overridable by env var (`KUBECONFIG_A`, `NODE_A_IP`, ...); the defaults match
 `vars/main.yml`.
 
+### Day-2 only, on SNOs installed elsewhere
+
+The Day-2 script and the failover test also run against any existing SNO pair
+where each node has one extra NIC on each of two isolated LANs. They need no
+KVM host and no node SSH key, just the two kubeconfigs. Keep the site values
+in an env file outside the repo:
+
+```bash
+# e.g. /root/prp-lab.env on the bastion - never committed
+export KUBECONFIG_A=/root/.kube/prp-a.kubeconfig KUBECONFIG_B=/root/.kube/prp-b.kubeconfig
+export NODE_A_HOSTNAME=<oc get nodes, cluster A> NODE_B_HOSTNAME=<cluster B>
+export PRP_PORT1=<NIC on LAN A> PRP_PORT2=<NIC on LAN B>
+export PRP_LAN_A_IFACE=<NIC on LAN A> PRP_LAN_B_IFACE=<NIC on LAN B>
+export NODE_EXEC=oc-debug   # node access via `oc debug node/...` instead of ssh
+export CUT_METHOD=node      # tests cut with `ip link set <nic> down` in the guest, not virsh
+```
+
+Then `. /root/prp-lab.env && ./scripts/apply-day2-prp.sh && ./scripts/test-prp-failover.sh`,
+and `PRP_BENCH_REPO=<quarkus-prp-bench checkout> ./scripts/test-prp-bench.sh` for
+the UDP benchmark.
+
+With `CUT_METHOD=node` a cut is `ip link set <nic> down` run on sno-a through
+`oc debug node/...` (a privileged pod on the host network, chrooted into the
+host). The kernel sees the carrier drop, so this is the guest-level test from
+Red Hat's KB - weaker than `virsh domif-setlink`, which kills the wire from
+outside while the guest still sees carrier. Each cut runs in a single node
+session whose trap brings the ports back on any exit, and the benchmark's
+receiver-side assertions still prove every cut took effect.
+For CI, register a self-hosted runner on that host with its own label (never
+`kvm-prp-lab`, since the matrix wipes and reinstalls VMs there). Put the same
+values, without `export`, in the runner's `.env`, and set the repository
+variable `PRP_RUNNER_LABELS` (e.g. `["self-hosted","prp-day2"]`). The
+*PRP failover test*, *PRP UDP benchmark* and *PRP Day-2 configuration*
+workflows then target that runner.
+
 `single` and `single-primary-prp` need no Day-2 steps - `single` has no PRP
 at all, and `single-primary-prp`'s PRP workaround is entirely Day-0 (see
 docs/spec-test-case-3-prp-primary.md).
@@ -123,7 +160,8 @@ Per-topology checks, each exits non-zero on any failure:
 ```
 ./scripts/test-single.sh          # Test Case 1: cluster health only, no PRP
 ./scripts/test-prp-failover.sh    # Test Case 2: health + prp0 mode + reachability +
-                                  #              a real hypervisor-level failover cut
+                                  #              a hypervisor-level failover cut
+                                  #              (guest-level with CUT_METHOD=node)
 ./scripts/test-prp-bench.sh       # Test Case 2 under load: 300s UDP benchmark at
                                   #              5000 msg/s with two 30s link cuts
 ```
@@ -145,14 +183,17 @@ asserts that each cut *actually degraded redundancy* - the named interface's
 afterwards. Those assertions are what give the zero-loss result meaning.
 
 The run is safe to interrupt: a detached watchdog restores both links even
-on `SIGKILL`, where a shell trap cannot run.
+on `SIGKILL`, where a shell trap cannot run. With `CUT_METHOD=node` the cut
+schedule runs inside one node session instead - it finishes and restores the
+ports even if this script dies - and is shifted by the node's measured clock
+offset, so a runner whose clock drifts cannot smear the cut windows.
 
 It expects the benchmark repo checked out alongside this one
 (`../quarkus-prp-bench`, override with `PRP_BENCH_REPO`) so it can apply the
 manifests itself. If the repo is absent it will use an already-deployed app,
 but only after checking one is actually there - otherwise it aborts with a
 single clear message instead of four unrelated readiness failures. Needs
-`jq` on the KVM host.
+`jq` (1.6 or newer) wherever it runs.
 
 For the full "start from nothing, prove it" cycle:
 
@@ -170,6 +211,15 @@ regression is visible on its own instead of as one line inside a two-hour
 run, and so it can be re-run against the live clusters without wiping them.
 Every suite's history is charted at
 **[the test health dashboard](https://arthur-r-oliveira.github.io/ocp-abi-local-sno/)**.
+The lab is ephemeral and GitHub artifacts expire after 90 days, so for
+sharing on Slack or attaching to Jira, build an offline snapshot: one HTML
+file with every run's logs and JUnit embedded, readable with no lab or
+GitHub access. It reads straight from the lab logs, so skim it before
+sharing.
+
+```bash
+./scripts/build-dashboard.py --offline --out site/prp-sno-test-health-$(date +%F).html
+```
 
 Two things worth knowing before you run it:
 

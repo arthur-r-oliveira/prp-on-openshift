@@ -13,6 +13,10 @@
 # reappears in a default catalog, this script will automatically use it
 # without needing the mirror.
 #
+# Clusters installed elsewhere (no KVM lab, no node SSH key) work too: point
+# KUBECONFIG_{A,B} at them, set NODE_{A,B}_HOSTNAME and PRP_PORT{1,2} to what
+# `oc get nodes` / `ip -br link` show there, and NODE_EXEC=oc-debug.
+#
 # Usage: ./apply-day2-prp.sh
 
 set -uo pipefail
@@ -23,8 +27,16 @@ KUBECONFIG_A="${KUBECONFIG_A:-/home/libvirt-images/sno-install/sno-a/auth/kubeco
 KUBECONFIG_B="${KUBECONFIG_B:-/home/libvirt-images/sno-install/sno-b/auth/kubeconfig}"
 NODE_A_IP="${NODE_A_IP:-192.168.130.101}"
 NODE_B_IP="${NODE_B_IP:-192.168.130.102}"
-SSH_USER="${SSH_USER:-core}"
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=5 -o BatchMode=yes)
+# Kubernetes node names (the NNCP nodeSelector) and the kernel names of the
+# NICs on the two isolated PRP LANs. The committed NNCPs carry the KVM lab's
+# values; these are substituted at apply time, the same way as the mirror host.
+NODE_A_HOSTNAME="${NODE_A_HOSTNAME:-sno-a.apps.lab.corp}"
+NODE_B_HOSTNAME="${NODE_B_HOSTNAME:-sno-b.apps.lab.corp}"
+PRP_PORT1="${PRP_PORT1:-enp6s0}"
+PRP_PORT2="${PRP_PORT2:-enp7s0}"
+
+# shellcheck source=node-exec.sh
+. scripts/node-exec.sh
 
 NMSTATE_VERSION="${NMSTATE_VERSION:-v0.87.0}"
 NMSTATE_BASE_URL="https://github.com/nmstate/kubernetes-nmstate/releases/download/${NMSTATE_VERSION}"
@@ -218,16 +230,14 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-# Apply NNCPs — each node's NNCP goes to its own cluster
-echo "--- Applying NNCPs ---"
-KUBECONFIG="$KUBECONFIG_A" oc apply -f day2-manifests/03-nncp-sno-a.yaml
-echo "  Applied NNCP to sno-a"
-KUBECONFIG="$KUBECONFIG_B" oc apply -f day2-manifests/03-nncp-sno-b.yaml
-echo "  Applied NNCP to sno-b"
-echo
-
-# Wait for MachineConfig-triggered reboots before checking NNCPs
+# Wait out the MachineConfig reboot BEFORE applying NNCPs. On an SNO the
+# node is the control plane, so mid-reboot the API refuses connections and
+# an NNCP applied then is simply lost (seen on fast-rebooting VMware SNOs;
+# the KVM lab's slower MCO rollout happened to hide the race). The MCP can
+# also still read Updated=True for a moment before the rollout starts, so
+# first give it a chance to flip to Updating.
 echo "--- Waiting for MachineConfig rollout (node reboots) ---"
+sleep 30
 for pair in "sno-a:$KUBECONFIG_A" "sno-b:$KUBECONFIG_B"; do
   name="${pair%%:*}"
   kc="${pair#*:}"
@@ -236,6 +246,24 @@ for pair in "sno-a:$KUBECONFIG_A" "sno-b:$KUBECONFIG_B"; do
     echo "  WARNING: ${name} MCP not yet Updated, continuing"
   fi
 done
+echo
+
+# Apply NNCPs — each node's NNCP goes to its own cluster
+echo "--- Applying NNCPs (ports ${PRP_PORT1}/${PRP_PORT2}) ---"
+nncp() {
+  sed -e "s|kubernetes.io/hostname: .*|kubernetes.io/hostname: $2|" \
+      -e "s|\benp6s0\b|${PRP_PORT1}|g" -e "s|\benp7s0\b|${PRP_PORT2}|g" "$1"
+}
+if nncp day2-manifests/03-nncp-sno-a.yaml "$NODE_A_HOSTNAME" | KUBECONFIG="$KUBECONFIG_A" oc apply -f -; then
+  echo "  Applied NNCP to sno-a ($NODE_A_HOSTNAME)"
+else
+  echo "  ERROR: NNCP apply failed on sno-a"; FAIL=1
+fi
+if nncp day2-manifests/03-nncp-sno-b.yaml "$NODE_B_HOSTNAME" | KUBECONFIG="$KUBECONFIG_B" oc apply -f -; then
+  echo "  Applied NNCP to sno-b ($NODE_B_HOSTNAME)"
+else
+  echo "  ERROR: NNCP apply failed on sno-b"; FAIL=1
+fi
 echo
 
 # Wait for NNCPs to be Available
@@ -251,14 +279,13 @@ done
 # Verify prp0 is actually up on both nodes via SSH
 echo
 echo "--- Verifying prp0 on nodes ---"
-for pair in "sno-a:$NODE_A_IP" "sno-b:$NODE_B_IP"; do
-  name="${pair%%:*}"
-  ip="${pair#*:}"
+for side in a b; do
+  name="sno-${side}"
   if ! wait_for "${name} prp0 link up" 120 \
-    "ssh ${SSH_OPTS[*]} ${SSH_USER}@${ip} 'ip -br link show prp0 2>/dev/null | grep -q UP'"; then
+    "node_sh $side 'ip -br link show prp0 2>/dev/null' | grep -q UP"; then
     FAIL=1
   else
-    proto=$(ssh "${SSH_OPTS[@]}" "$SSH_USER@$ip" "ip -d link show prp0 2>/dev/null" \
+    proto=$(node_sh "$side" "ip -d link show prp0 2>/dev/null" \
       | grep -o 'proto [0-9]' | awk '{print $2}')
     echo "  ${name} prp0 proto=${proto} (1=PRP, 0=HSR)"
   fi
