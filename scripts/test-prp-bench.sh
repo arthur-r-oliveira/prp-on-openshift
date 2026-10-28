@@ -188,9 +188,9 @@ wait_for_endpoint() {
 }
 
 degraded_count() {
-  jq -s --arg if "$1" --argjson lo "$2" --argjson hi "$3" \
+  jq -s --arg ifn "$1" --argjson lo "$2" --argjson hi "$3" \
     '[.[] | select(.t >= $lo and .t <= $hi)
-          | select(.ok == false and .lans[$if].r == 0)] | length' \
+          | select(.ok == false and .lans[$ifn].r == 0)] | length' \
     "$SAMPLES" 2>/dev/null || echo 0
 }
 

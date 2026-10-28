@@ -230,20 +230,14 @@ if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 
-# Apply NNCPs — each node's NNCP goes to its own cluster
-echo "--- Applying NNCPs (ports ${PRP_PORT1}/${PRP_PORT2}) ---"
-nncp() {
-  sed -e "s|kubernetes.io/hostname: .*|kubernetes.io/hostname: $2|" \
-      -e "s|\benp6s0\b|${PRP_PORT1}|g" -e "s|\benp7s0\b|${PRP_PORT2}|g" "$1"
-}
-nncp day2-manifests/03-nncp-sno-a.yaml "$NODE_A_HOSTNAME" | KUBECONFIG="$KUBECONFIG_A" oc apply -f -
-echo "  Applied NNCP to sno-a ($NODE_A_HOSTNAME)"
-nncp day2-manifests/03-nncp-sno-b.yaml "$NODE_B_HOSTNAME" | KUBECONFIG="$KUBECONFIG_B" oc apply -f -
-echo "  Applied NNCP to sno-b ($NODE_B_HOSTNAME)"
-echo
-
-# Wait for MachineConfig-triggered reboots before checking NNCPs
+# Wait out the MachineConfig reboot BEFORE applying NNCPs. On an SNO the
+# node is the control plane, so mid-reboot the API refuses connections and
+# an NNCP applied then is simply lost (seen on fast-rebooting VMware SNOs;
+# the KVM lab's slower MCO rollout happened to hide the race). The MCP can
+# also still read Updated=True for a moment before the rollout starts, so
+# first give it a chance to flip to Updating.
 echo "--- Waiting for MachineConfig rollout (node reboots) ---"
+sleep 30
 for pair in "sno-a:$KUBECONFIG_A" "sno-b:$KUBECONFIG_B"; do
   name="${pair%%:*}"
   kc="${pair#*:}"
@@ -252,6 +246,24 @@ for pair in "sno-a:$KUBECONFIG_A" "sno-b:$KUBECONFIG_B"; do
     echo "  WARNING: ${name} MCP not yet Updated, continuing"
   fi
 done
+echo
+
+# Apply NNCPs — each node's NNCP goes to its own cluster
+echo "--- Applying NNCPs (ports ${PRP_PORT1}/${PRP_PORT2}) ---"
+nncp() {
+  sed -e "s|kubernetes.io/hostname: .*|kubernetes.io/hostname: $2|" \
+      -e "s|\benp6s0\b|${PRP_PORT1}|g" -e "s|\benp7s0\b|${PRP_PORT2}|g" "$1"
+}
+if nncp day2-manifests/03-nncp-sno-a.yaml "$NODE_A_HOSTNAME" | KUBECONFIG="$KUBECONFIG_A" oc apply -f -; then
+  echo "  Applied NNCP to sno-a ($NODE_A_HOSTNAME)"
+else
+  echo "  ERROR: NNCP apply failed on sno-a"; FAIL=1
+fi
+if nncp day2-manifests/03-nncp-sno-b.yaml "$NODE_B_HOSTNAME" | KUBECONFIG="$KUBECONFIG_B" oc apply -f -; then
+  echo "  Applied NNCP to sno-b ($NODE_B_HOSTNAME)"
+else
+  echo "  ERROR: NNCP apply failed on sno-b"; FAIL=1
+fi
 echo
 
 # Wait for NNCPs to be Available
