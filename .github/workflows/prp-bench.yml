@@ -8,6 +8,9 @@ name: PRP UDP benchmark
 on:
   schedule:
     - cron: "0 7 * * *"
+    # Burst mode (see prp-test.yml): every 20 minutes, between the failover
+    # test's slots, only while PRP_CI_BURST is "true". A run takes ~8 min.
+    - cron: "5,25,45 * * * *"
   workflow_run:
     workflows: ["SNO test matrix (wipe + single + dual-sidecar-prp)"]
     types: [completed]
@@ -36,10 +39,13 @@ jobs:
   bench:
     # A failed matrix usually means no healthy clusters to benchmark, so skip
     # rather than report a cascade of failures that say nothing about PRP.
-    # A manual dispatch or a scheduled run always runs.
+    # A manual dispatch or a scheduled run always runs; burst-schedule runs
+    # only while PRP_CI_BURST is "true".
     if: >-
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event_name != 'workflow_run' ||
+       github.event.workflow_run.conclusion == 'success') &&
+      (github.event.schedule != '5,25,45 * * * *' ||
+       vars.PRP_CI_BURST == 'true')
     # Runner (and so lab) chosen by repository variable; site values come
     # from that runner's .env (see prp-test.yml).
     runs-on: ${{ fromJSON(vars.PRP_RUNNER_LABELS || '["self-hosted","kvm-prp-lab"]') }}
