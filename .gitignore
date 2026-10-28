@@ -1,3 +1,8 @@
 site/
 scripts/__pycache__/
 HANDOFF.md
+HANDOFF-*.md
+instructions.md
+rhoso-airgap-abi-statement.md
+reply-draft-*.md
+*-use-case.md
