@@ -1,0 +1,58 @@
+name: PRP continuous (failover + benchmark)
+
+# Runs the failover test, then the benchmark, then dispatches itself again -
+# back to back, with no idle gap, for as long as a short-lived lab is up.
+# One cycle is ~15 min on an oc-debug lab.
+#
+# Start: gh variable set PRP_CI_CONTINUOUS --body true
+#        gh workflow run prp-continuous.yml
+# Stop:  gh variable delete PRP_CI_CONTINUOUS
+#        (the cycle in progress finishes; no new one is dispatched)
+#        Cancelling a run does NOT stop the loop - see the `next` job.
+#
+# Don't combine with PRP_CI_BURST: both feed the same prp-bench concurrency
+# group, which keeps only one waiting job and cancels the other.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# One loop at a time, even if it is dispatched twice by hand. Not the
+# prp-bench group: the called workflows take that one, and sharing it
+# with their caller would deadlock.
+concurrency:
+  group: prp-continuous
+  cancel-in-progress: false
+
+jobs:
+  failover:
+    if: vars.PRP_CI_CONTINUOUS == 'true'
+    uses: ./.github/workflows/prp-test.yml
+
+  # Runs after a failed failover test too: the benchmark is evidence on its
+  # own, and the dashboard needs both results.
+  bench:
+    needs: failover
+    if: always() && vars.PRP_CI_CONTINUOUS == 'true'
+    uses: ./.github/workflows/prp-bench.yml
+
+  next:
+    needs: bench
+    # The variable is read again here, so deleting it stops the loop at the
+    # end of the cycle in progress. always(), not !cancelled(): the prp-bench
+    # group cancels a waiting job when a daily scheduled run queues behind
+    # it, and that must not silently end the loop. So the variable is the
+    # only off switch (or `gh workflow disable prp-continuous.yml`).
+    if: always() && vars.PRP_CI_CONTINUOUS == 'true'
+    # Only talks to the API, so it must not hold the lab runner.
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      # GITHUB_TOKEN-triggered events start no workflows, except
+      # workflow_dispatch - which is what makes this self-chaining possible.
+      - name: Dispatch the next cycle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run prp-continuous.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"

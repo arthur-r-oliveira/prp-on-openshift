@@ -1,0 +1,61 @@
+---
+# One failover test + benchmark pass, included per cycle by prp_day2_ci.yml.
+# A failing suite does not stop the cycle: the benchmark is still worth
+# running after a failover failure, and the playbook fails at the end.
+- name: "Cycle {{ prp_cycle }} - create results directory"
+  ansible.builtin.file:
+    path: "{{ prp_remote_results }}/cycle-{{ prp_cycle }}"
+    state: directory
+    mode: "0755"
+
+- name: "Cycle {{ prp_cycle }} - run the failover test"
+  ansible.builtin.shell: |
+    set -a; . {{ prp_env_file | quote }}; set +a
+    out={{ (prp_remote_results ~ '/cycle-' ~ prp_cycle) | quote }}
+    ./scripts/test-prp-failover.sh 2>&1 | tee "$out/prp-failover.log"
+    rc=${PIPESTATUS[0]}
+    ./scripts/to-junit-xml.sh prp-failover < "$out/prp-failover.log" > "$out/prp-failover.xml"
+    exit $rc
+  args:
+    chdir: "{{ prp_remote_dir }}"
+    executable: /bin/bash
+  async: 1800
+  poll: 15
+  register: prp_failover
+  failed_when: false
+  when: prp_run_failover | bool
+
+- name: "Cycle {{ prp_cycle }} - run the UDP benchmark"
+  ansible.builtin.shell: |
+    set -a; . {{ prp_env_file | quote }}; set +a
+    out={{ (prp_remote_results ~ '/cycle-' ~ prp_cycle) | quote }}
+    export PRP_BENCH_REPO={{ prp_bench_repo | quote }} LOG_DIR="$out"
+    export RATE={{ prp_bench_rate }} DURATION={{ prp_bench_duration }} PAYLOAD={{ prp_bench_payload }}
+    ./scripts/test-prp-bench.sh 2>&1 | tee "$out/prp-bench.log"
+    rc=${PIPESTATUS[0]}
+    ./scripts/to-junit-xml.sh prp-bench < "$out/prp-bench.log" > "$out/prp-bench.xml"
+    exit $rc
+  args:
+    chdir: "{{ prp_remote_dir }}"
+    executable: /bin/bash
+  async: 3600
+  poll: 15
+  register: prp_bench
+  failed_when: false
+  when: prp_run_bench | bool
+
+- name: "Cycle {{ prp_cycle }} - record outcomes"
+  ansible.builtin.set_fact:
+    prp_outcomes: >-
+      {{ prp_outcomes | default([])
+         + ([{'cycle': prp_cycle, 'suite': 'prp-failover', 'rc': prp_failover.rc | default(-1)}]
+            if prp_failover is not skipped else [])
+         + ([{'cycle': prp_cycle, 'suite': 'prp-bench', 'rc': prp_bench.rc | default(-1)}]
+            if prp_bench is not skipped else []) }}
+
+- name: "Cycle {{ prp_cycle }} - result lines"
+  ansible.builtin.debug:
+    msg: >-
+      {{ ((prp_failover.stdout_lines | default([]))
+          + (prp_bench.stdout_lines | default([])))
+         | select('match', '^\[(PASS|FAIL)\]') | list }}

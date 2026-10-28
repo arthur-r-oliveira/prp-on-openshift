@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 WORKFLOW_LABELS = {
     "PRP failover test": "PRP failover",
     "PRP UDP benchmark": "PRP benchmark",
+    "PRP continuous (failover + benchmark)": "PRP continuous",
     "SNO test matrix (wipe + single + dual-sidecar-prp)": "SNO matrix",
 }
 

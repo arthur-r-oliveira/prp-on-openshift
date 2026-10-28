@@ -1,0 +1,149 @@
+---
+# Manual run of the Day-2 CI mode: the same failover test and UDP benchmark
+# the "PRP failover test" / "PRP UDP benchmark" workflows run, driven from a
+# workstation against a bastion that already reaches both SNOs by kubeconfig.
+# Nothing is installed or wiped; the SNOs are assumed built elsewhere.
+#
+# The bastion needs: oc, curl, jq, git, and a site env file (see README, "Day-2
+# only, on SNOs installed elsewhere") - a runner .env without `export` works
+# too. Site values stay on the bastion; nothing here names a real host.
+#
+#   # inventory outside the repo, e.g. ~/prp-inventory.yml:
+#   #   prp_bastion:
+#   #     hosts:
+#   #       <bastion fqdn>:
+#   #         ansible_user: root
+#   ansible-playbook -i ~/prp-inventory.yml prp_day2_ci.yml
+#   ansible-playbook -i ~/prp-inventory.yml prp_day2_ci.yml -e prp_cycles=3
+#   ansible-playbook -i ~/prp-inventory.yml prp_day2_ci.yml -e prp_run_day2=true
+#
+# Logs, JUnit XML and bench samples are fetched to prp_local_results.
+- name: Run the Day-2 PRP CI cycle on pre-built SNOs from the bastion
+  hosts: prp_bastion
+  gather_facts: false
+  vars:
+    prp_remote_dir: /root/prp-on-openshift
+    prp_env_file: /root/prp-lab.env
+    prp_bench_repo: /root/quarkus-prp-bench
+    prp_bench_repo_url: https://github.com/arthur-r-oliveira/quarkus-prp-bench
+    # CI checks out the bench repo's main on every run; match that unless the
+    # bastion checkout carries changes you want to test.
+    prp_bench_repo_update: true
+    # Reboots both nodes (hsr MachineConfig) and rewrites prp0 - opt in.
+    prp_run_day2: false
+    prp_run_failover: true
+    prp_run_bench: true
+    prp_cycles: 1
+    prp_bench_rate: 5000
+    prp_bench_duration: 300
+    prp_bench_payload: 256
+    # A CI job on the same lab would cut links under this run (and vice
+    # versa), so refuse to start while the bastion's runner is busy.
+    prp_ignore_runner: false
+    prp_local_results: "{{ lookup('env', 'HOME') }}/prp-ci-results/{{ prp_run_id }}"
+    prp_remote_results: "{{ prp_remote_dir }}/ci-results/{{ prp_run_id }}"
+
+  tasks:
+    # Pinned once: play vars are re-templated on every use, so a lookup there
+    # would give each task its own timestamp.
+    - name: Pick the run id
+      ansible.builtin.set_fact:
+        prp_run_id: "{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+
+    - name: Check the site env file exists
+      ansible.builtin.stat:
+        path: "{{ prp_env_file }}"
+      register: prp_env_stat
+      failed_when: not prp_env_stat.stat.exists
+
+    - name: Check no CI job is running on this bastion's runner
+      ansible.builtin.command: pgrep -x Runner.Worker
+      register: prp_runner_busy
+      changed_when: false
+      failed_when: prp_runner_busy.rc == 0 and not prp_ignore_runner | bool
+
+    - name: Sync scripts and Day-2 manifests to the bastion
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/{{ item }}/"
+        dest: "{{ prp_remote_dir }}/{{ item }}/"
+        mode: preserve
+      loop:
+        - scripts
+        - day2-manifests
+
+    - name: Update the prp-bench checkout
+      ansible.builtin.git:
+        repo: "{{ prp_bench_repo_url }}"
+        dest: "{{ prp_bench_repo }}"
+        version: main
+      when: prp_bench_repo_update | bool
+
+    # Kubeconfigs from `oc login` carry tokens that expire; catch that here
+    # rather than as a page of failed test lines.
+    - name: Check both clusters answer through their kubeconfigs
+      ansible.builtin.shell: |
+        set -a; . {{ prp_env_file | quote }}; set +a
+        for side in A B; do
+          kc_var="KUBECONFIG_$side"
+          ver=$(KUBECONFIG="${!kc_var}" oc get clusterversion version \
+                  -o jsonpath='{.status.desired.version}') || {
+            echo "cluster $side unreachable via ${!kc_var} - token expired?" >&2
+            exit 1
+          }
+          echo "cluster $side: OCP $ver"
+        done
+      args:
+        executable: /bin/bash
+      register: prp_preflight
+      changed_when: false
+
+    - name: Show cluster versions
+      ansible.builtin.debug:
+        var: prp_preflight.stdout_lines
+
+    - name: Apply the Day-2 PRP configuration
+      ansible.builtin.shell: |
+        set -a; . {{ prp_env_file | quote }}; set +a
+        mkdir -p {{ prp_remote_results | quote }}
+        ./scripts/apply-day2-prp.sh 2>&1 | tee {{ prp_remote_results | quote }}/apply-day2-prp.log
+        exit ${PIPESTATUS[0]}
+      args:
+        chdir: "{{ prp_remote_dir }}"
+        executable: /bin/bash
+      async: 3600
+      poll: 15
+      when: prp_run_day2 | bool
+
+    - name: Run the test cycles
+      ansible.builtin.include_tasks: tasks/prp_day2_cycle.yml
+      loop: "{{ range(1, prp_cycles | int + 1) | list }}"
+      loop_control:
+        loop_var: prp_cycle
+
+    - name: Find result files on the bastion
+      ansible.builtin.find:
+        paths: "{{ prp_remote_results }}"
+        recurse: true
+      register: prp_result_files
+
+    - name: Fetch results
+      ansible.builtin.fetch:
+        src: "{{ item.path }}"
+        dest: "{{ prp_local_results }}/{{ item.path | relpath(prp_remote_results) }}"
+        flat: true
+      loop: "{{ prp_result_files.files }}"
+      loop_control:
+        label: "{{ item.path | relpath(prp_remote_results) }}"
+
+    - name: Summarise
+      ansible.builtin.debug:
+        msg: "cycle {{ item.cycle }} {{ item.suite }}: {{ 'PASS' if item.rc == 0 else 'FAIL (rc ' ~ item.rc ~ ')' }}"
+      loop: "{{ prp_outcomes | default([]) }}"
+      loop_control:
+        label: "{{ item.suite }}"
+
+    - name: Fail if any suite failed
+      ansible.builtin.assert:
+        that: prp_outcomes | default([]) | selectattr('rc', 'ne', 0) | list | length == 0
+        fail_msg: "failed suites - logs in {{ prp_local_results }}"
+        success_msg: "all suites passed - logs in {{ prp_local_results }}"
