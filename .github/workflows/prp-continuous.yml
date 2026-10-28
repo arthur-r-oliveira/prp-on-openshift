@@ -56,3 +56,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run prp-continuous.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
+
+  # Every cycle after the first is dispatched by GITHUB_TOKEN, and the
+  # completion of such a run fires no workflow_run event - so the dashboard's
+  # own trigger never sees it. Ask for the rebuild directly instead. Not
+  # gated on the variable: the last cycle before a stop still gets charted.
+  dashboard:
+    needs: bench
+    if: always() && needs.bench.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Rebuild the dashboard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run dashboard.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME"
