@@ -147,6 +147,10 @@ variable `PRP_RUNNER_LABELS` (e.g. `["self-hosted","prp-day2"]`). The
 *PRP failover test*, *PRP UDP benchmark* and *PRP Day-2 configuration*
 workflows then target that runner.
 
+For a short-lived lab, set the repository variable `PRP_CI_BURST=true` to run
+the failover test and the benchmark every 20 minutes each, interleaved so cuts
+never overlap (~6 runs/hour); delete the variable when the lab is torn down.
+
 `single` and `single-primary-prp` need no Day-2 steps - `single` has no PRP
 at all, and `single-primary-prp`'s PRP workaround is entirely Day-0 (see
 docs/spec-test-case-3-prp-primary.md).
