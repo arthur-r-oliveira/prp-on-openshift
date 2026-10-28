@@ -25,6 +25,18 @@ on:
       payload:
         description: "Payload bytes"
         default: "256"
+  # Called by prp-continuous.yml (see prp-test.yml).
+  workflow_call:
+    inputs:
+      rate:
+        type: string
+        default: "5000"
+      duration:
+        type: string
+        default: "300"
+      payload:
+        type: string
+        default: "256"
 
 permissions:
   contents: read

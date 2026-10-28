@@ -8,6 +8,7 @@ on:
     workflows:
       - "PRP failover test"
       - "PRP UDP benchmark"
+      - "PRP continuous (failover + benchmark)"
       - "SNO test matrix (wipe + single + dual-sidecar-prp)"
     types: [completed]
   workflow_dispatch: {}

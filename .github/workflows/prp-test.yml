@@ -2,6 +2,9 @@ name: PRP failover test
 
 on:
   workflow_dispatch: {}
+  # Called by prp-continuous.yml, which runs this and the benchmark back to
+  # back in a loop.
+  workflow_call: {}
   schedule:
     - cron: "0 6 * * *"
     # Burst mode for short-lived labs: every 20 minutes, interleaved with the

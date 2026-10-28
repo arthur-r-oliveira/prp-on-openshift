@@ -151,6 +151,27 @@ For a short-lived lab, set the repository variable `PRP_CI_BURST=true` to run
 the failover test and the benchmark every 20 minutes each, interleaved so cuts
 never overlap (~6 runs/hour); delete the variable when the lab is torn down.
 
+To run them back to back instead, with no idle gap, set `PRP_CI_CONTINUOUS=true`
+and dispatch *PRP continuous (failover + benchmark)* once
+(`gh workflow run prp-continuous.yml`). Each run is one failover test plus one
+benchmark, and then it dispatches the next run. Deleting the variable stops the loop
+after the cycle in progress. Use either burst or continuous, not both.
+
+The same cycle runs by hand from a workstation with Ansible, against the bastion
+(no runner needed). Keep the inventory outside the repo:
+
+```
+ansible-playbook -i ~/prp-inventory.yml prp_day2_ci.yml                     # one failover + bench cycle
+ansible-playbook -i ~/prp-inventory.yml prp_day2_ci.yml -e prp_cycles=5     # five, back to back
+ansible-playbook -i ~/prp-inventory.yml prp_day2_ci.yml -e prp_run_day2=true  # apply Day-2 first
+```
+
+It syncs `scripts/` and `day2-manifests/` to the bastion and sources the site
+env file (`prp_env_file`, default `/root/prp-lab.env`; a runner `.env` works too).
+It checks that both clusters answer, then runs the suites and fetches logs, JUnit and
+bench samples to `~/prp-ci-results/<timestamp>/`. It refuses to start while the
+bastion's CI runner has a job in progress (`-e prp_ignore_runner=true` overrides).
+
 `single` and `single-primary-prp` need no Day-2 steps - `single` has no PRP
 at all, and `single-primary-prp`'s PRP workaround is entirely Day-0 (see
 docs/spec-test-case-3-prp-primary.md).
