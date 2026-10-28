@@ -38,7 +38,9 @@
     prp_bench_duration: 300
     prp_bench_payload: 256
     # A CI job on the same lab would cut links under this run (and vice
-    # versa), so refuse to start while the bastion's runner is busy.
+    # versa), so refuse to start while this repo's runner is busy. Matched by
+    # install dir: other repos' runners may share the bastion.
+    prp_runner_dir: /root/actions-runner-prp
     prp_ignore_runner: false
     prp_local_results: "{{ lookup('env', 'HOME') }}/prp-ci-results/{{ prp_run_id }}"
     prp_remote_results: "{{ prp_remote_dir }}/ci-results/{{ prp_run_id }}"
@@ -57,7 +59,7 @@
       failed_when: not prp_env_stat.stat.exists
 
     - name: Check no CI job is running on this bastion's runner
-      ansible.builtin.command: pgrep -x Runner.Worker
+      ansible.builtin.command: pgrep -f "^{{ prp_runner_dir }}/bin/Runner.Worker"
       register: prp_runner_busy
       changed_when: false
       failed_when: prp_runner_busy.rc == 0 and not prp_ignore_runner | bool
