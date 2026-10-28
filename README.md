@@ -170,6 +170,15 @@ regression is visible on its own instead of as one line inside a two-hour
 run, and so it can be re-run against the live clusters without wiping them.
 Every suite's history is charted at
 **[the test health dashboard](https://arthur-r-oliveira.github.io/ocp-abi-local-sno/)**.
+The lab is ephemeral and GitHub artifacts expire after 90 days, so for
+sharing on Slack or attaching to Jira, build an offline snapshot: one HTML
+file with every run's logs and JUnit embedded, readable with no lab or
+GitHub access. It reads straight from the lab logs, so skim it before
+sharing.
+
+```bash
+./scripts/build-dashboard.py --offline --out site/prp-sno-test-health-$(date +%F).html
+```
 
 Two things worth knowing before you run it:
 
