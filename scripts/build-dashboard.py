@@ -16,7 +16,7 @@ opt-in so the published Pages build stays small. Write it under site/ (which
 is gitignored) and skim the logs before sharing: they come straight off the
 lab host.
 
-Usage: ./scripts/build-dashboard.py [--out site/index.html] [--limit 100]
+Usage: ./scripts/build-dashboard.py [--out site/index.html] [--limit 100]   # per workflow
                                     [--offline]
 """
 
@@ -86,11 +86,20 @@ def collect(limit, keep_files=False):
     """Returns (runs, records, files). A run with no parsable artifact is
     skipped. files maps run id -> embedded artifacts, filled only when
     keep_files is set."""
-    raw = gh(
-        "run", "list", "--limit", str(limit), "--json",
-        "databaseId,createdAt,conclusion,workflowName,headSha,url",
-    )
-    runs_meta = {str(r["databaseId"]): r for r in json.loads(raw)}
+    # The limit applies per workflow: one global window let a busy schedule
+    # (the continuous loop runs every few minutes) push every other suite's
+    # history off the page within hours. This dashboard's own runs never
+    # carry JUnit, so they are not listed at all.
+    runs_meta = {}
+    for wf in json.loads(gh("workflow", "list", "--all", "--json", "id,name")):
+        if wf["name"] == "Test health dashboard":
+            continue
+        raw = gh(
+            "run", "list", "--workflow", str(wf["id"]),
+            "--limit", str(limit), "--json",
+            "databaseId,createdAt,conclusion,workflowName,headSha,url",
+        )
+        runs_meta.update({str(r["databaseId"]): r for r in json.loads(raw)})
 
     runs, records, files = [], [], {}
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="dashboard-"))
@@ -803,7 +812,8 @@ document.getElementById('themeBtn').addEventListener('click', () => {
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="site/index.html")
-    ap.add_argument("--limit", type=int, default=100)
+    ap.add_argument("--limit", type=int, default=100,
+                    help="most recent runs to read, per workflow")
     ap.add_argument("--offline", action="store_true",
                     help="embed every run's artifact files for sharing")
     args = ap.parse_args()

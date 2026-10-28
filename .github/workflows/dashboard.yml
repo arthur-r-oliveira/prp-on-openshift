@@ -8,8 +8,11 @@ on:
     workflows:
       - "PRP failover test"
       - "PRP UDP benchmark"
-      - "PRP continuous (failover + benchmark)"
-      - "SNO test matrix (wipe + single + dual-sidecar-prp)"
+      # These are glob patterns, not literal names, and `+` is a glob
+      # operator there: the full names of the two below never matched, so
+      # their runs never rebuilt the page. Prefixes match.
+      - "PRP continuous*"
+      - "SNO test matrix*"
     types: [completed]
   workflow_dispatch: {}
 
