@@ -16,8 +16,14 @@ opt-in so the published Pages build stays small. Write it under site/ (which
 is gitignored) and skim the logs before sharing: they come straight off the
 lab host.
 
+Runs started inside a window listed in scripts/dashboard-exclusions.json (a
+lab outage, say) are left out of every figure, and the page says so - with
+the window, the run count and the reason - so the pass rate never hides what
+it skipped. Whole windows only, passes included: dropping just the failures
+would flatter the rate.
+
 Usage: ./scripts/build-dashboard.py [--out site/index.html] [--limit 100]   # per workflow
-                                    [--offline]
+                                    [--offline] [--exclusions FILE | --exclusions '']
 """
 
 import argparse
@@ -82,10 +88,11 @@ def gh(*args, check=True):
     return r.stdout
 
 
-def collect(limit, keep_files=False):
+def collect(limit, keep_files=False, exclusions=()):
     """Returns (runs, records, files). A run with no parsable artifact is
-    skipped. files maps run id -> embedded artifacts, filled only when
-    keep_files is set."""
+    skipped, as is one started inside an exclusion window (each window's
+    "runs" count is filled in). files maps run id -> embedded artifacts,
+    filled only when keep_files is set."""
     # The limit applies per workflow: one global window let a busy schedule
     # (the continuous loop runs every few minutes) push every other suite's
     # history off the page within hours. This dashboard's own runs never
@@ -100,6 +107,16 @@ def collect(limit, keep_files=False):
             "databaseId,createdAt,conclusion,workflowName,headSha,url",
         )
         runs_meta.update({str(r["databaseId"]): r for r in json.loads(raw)})
+
+    # ISO-8601 UTC strings compare correctly as text.
+    for ex in exclusions:
+        ex["runs"] = 0
+    for rid, meta in list(runs_meta.items()):
+        for ex in exclusions:
+            if ex["from"] <= meta["createdAt"] <= ex["to"]:
+                ex["runs"] += 1
+                del runs_meta[rid]
+                break
 
     runs, records, files = [], [], {}
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="dashboard-"))
@@ -157,7 +174,7 @@ def collect(limit, keep_files=False):
     return runs, records, files
 
 
-def aggregate(runs, records, files):
+def aggregate(runs, records, files, exclusions=()):
     order = {r["id"]: i for i, r in enumerate(runs)}
     records = [r for r in records if r["run"] in order]
 
@@ -207,6 +224,7 @@ def aggregate(runs, records, files):
         "notes": notes,
         "files": files,
         "offline": bool(files),
+        "excluded": [ex for ex in exclusions if ex["runs"]],
         "totals": {
             "records": total,
             "passed": passed,
@@ -384,6 +402,7 @@ HTML = """<!DOCTYPE html>
     <div>
       <h1>PRP / SNO test health</h1>
       <p class="sub" id="subtitle"></p>
+      <p class="sub" id="excluded" hidden></p>
     </div>
     <div class="spacer"></div>
     <div class="controls">
@@ -482,6 +501,13 @@ function kpis() {
   const t = D.totals;
   document.getElementById('subtitle').textContent =
     `${t.runs} CI runs · ${t.records} test executions · ${t.first} to ${t.last}`;
+  if (D.excluded.length) {
+    const utc = s => s.replace('T', ' ').slice(0, 16);
+    const el = document.getElementById('excluded');
+    el.textContent = 'Excluded from all figures: ' + D.excluded.map(x =>
+      `${x.runs} run${x.runs === 1 ? '' : 's'}, ${utc(x.from)} → ${utc(x.to)} UTC (${x.reason})`).join('; ');
+    el.hidden = false;
+  }
   const tiles = [
     {k: 'Overall pass rate', v: t.rate + '%', note: `${t.passed} of ${t.records} executions`, hero: true},
     {k: 'CI runs', v: t.runs, note: `${t.first} → ${t.last}`},
@@ -816,12 +842,16 @@ def main():
                     help="most recent runs to read, per workflow")
     ap.add_argument("--offline", action="store_true",
                     help="embed every run's artifact files for sharing")
+    ap.add_argument("--exclusions",
+                    default=str(pathlib.Path(__file__).with_name("dashboard-exclusions.json")),
+                    help="JSON list of {from, to, reason} windows to leave out; '' for none")
     args = ap.parse_args()
 
-    runs, records, files = collect(args.limit, keep_files=args.offline)
+    exclusions = json.loads(pathlib.Path(args.exclusions).read_text()) if args.exclusions else []
+    runs, records, files = collect(args.limit, keep_files=args.offline, exclusions=exclusions)
     if not runs:
         sys.exit("no runs with parsable JUnit artifacts found")
-    data = aggregate(runs, records, files)
+    data = aggregate(runs, records, files, exclusions)
 
     out = pathlib.Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -833,6 +863,8 @@ def main():
     print(f"wrote {out}  ({t['runs']} runs, {t['records']} executions, "
           f"{t['types']} test types, {t['rate']}% overall, "
           f"{out.stat().st_size / 1024:.0f} KB)")
+    for ex in data["excluded"]:
+        print(f"excluded {ex['runs']} runs {ex['from']} .. {ex['to']}: {ex['reason']}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,7 @@
+[
+  {
+    "from": "2026-10-28T19:12:00Z",
+    "to": "2026-10-29T07:45:00Z",
+    "reason": "lab outage: sno-a was down, so every sno-a check failed - not a PRP result"
+  }
+]
