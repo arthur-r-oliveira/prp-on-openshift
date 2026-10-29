@@ -157,6 +157,14 @@ and dispatch *PRP continuous (failover + benchmark)* once
 benchmark, and then it dispatches the next run. Deleting the variable stops the loop
 after the cycle in progress. Use either burst or continuous, not both.
 
+Every failover and benchmark run first checks that both nodes are `Ready`
+(`scripts/lab-online.sh`). If either is down the tests are skipped, not
+failed, so an outage leaves a gap on the dashboard rather than a run of
+failures; in continuous mode the check waits up to 15 minutes for the lab to
+come back before skipping. Outages from before that check existed are left
+out of the dashboard figures via `scripts/dashboard-exclusions.json`, and the
+page states each excluded window and why.
+
 The same cycle runs by hand from a workstation with Ansible, against the bastion
 (no runner needed). Keep the inventory outside the repo:
 

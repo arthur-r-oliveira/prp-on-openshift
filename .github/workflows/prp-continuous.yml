@@ -29,6 +29,11 @@ jobs:
   failover:
     if: vars.PRP_CI_CONTINUOUS == 'true'
     uses: ./.github/workflows/prp-test.yml
+    # During an outage the gate waits up to 15 min for both nodes, then the
+    # cycle skips its tests - so the loop idles at one cycle per ~15 min
+    # instead of re-dispatching itself every few seconds.
+    with:
+      lab_wait: "900"
 
   # Runs after a failed failover test too: the benchmark is evidence on its
   # own, and the dashboard needs both results.
