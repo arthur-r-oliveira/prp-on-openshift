@@ -37,6 +37,10 @@ on:
       payload:
         type: string
         default: "256"
+      lab_wait:
+        description: "Seconds to wait for both nodes to be Ready before skipping"
+        type: string
+        default: "0"
 
 permissions:
   contents: read
@@ -48,7 +52,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  bench:
+  # Both SNOs up, or the suite is skipped (not failed): an outage would
+  # otherwise chart as a run of failures that say nothing about PRP.
+  lab:
     # A failed matrix usually means no healthy clusters to benchmark, so skip
     # rather than report a cascade of failures that say nothing about PRP.
     # A manual dispatch or a scheduled run always runs; burst-schedule runs
@@ -58,6 +64,25 @@ jobs:
        github.event.workflow_run.conclusion == 'success') &&
       (github.event.schedule != '5,25,45 * * * *' ||
        vars.PRP_CI_BURST == 'true')
+    runs-on: ${{ fromJSON(vars.PRP_RUNNER_LABELS || '["self-hosted","kvm-prp-lab"]') }}
+    timeout-minutes: 30
+    outputs:
+      online: ${{ steps.check.outputs.online }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check both nodes are Ready
+        id: check
+        run: |
+          if ./scripts/lab-online.sh "${{ inputs.lab_wait || '0' }}"; then
+            echo "online=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::lab offline (a node is not Ready) - tests skipped"
+            echo "online=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  bench:
+    needs: lab
+    if: needs.lab.outputs.online == 'true'
     # Runner (and so lab) chosen by repository variable; site values come
     # from that runner's .env (see prp-test.yml).
     runs-on: ${{ fromJSON(vars.PRP_RUNNER_LABELS || '["self-hosted","kvm-prp-lab"]') }}

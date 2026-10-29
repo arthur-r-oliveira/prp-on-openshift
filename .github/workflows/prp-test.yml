@@ -4,7 +4,12 @@ on:
   workflow_dispatch: {}
   # Called by prp-continuous.yml, which runs this and the benchmark back to
   # back in a loop.
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      lab_wait:
+        description: "Seconds to wait for both nodes to be Ready before skipping"
+        type: string
+        default: "0"
   schedule:
     - cron: "0 6 * * *"
     # Burst mode for short-lived labs: every 20 minutes, interleaved with the
@@ -20,10 +25,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  prp-failover:
+  # Both SNOs up, or the suite is skipped (not failed): an outage would
+  # otherwise chart as a run of failures that say nothing about PRP.
+  lab:
     if: >-
       github.event.schedule != '0,20,40 * * * *' ||
       vars.PRP_CI_BURST == 'true'
+    runs-on: ${{ fromJSON(vars.PRP_RUNNER_LABELS || '["self-hosted","kvm-prp-lab"]') }}
+    timeout-minutes: 30
+    outputs:
+      online: ${{ steps.check.outputs.online }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check both nodes are Ready
+        id: check
+        run: |
+          if ./scripts/lab-online.sh "${{ inputs.lab_wait || '0' }}"; then
+            echo "online=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::lab offline (a node is not Ready) - tests skipped"
+            echo "online=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  prp-failover:
+    needs: lab
+    if: needs.lab.outputs.online == 'true'
     # Which lab to test is a repository variable, so pointing CI at another
     # SNO pair is a settings change, not a commit. Site specifics (kubeconfig
     # paths, node names, NIC names, NODE_EXEC/CUT_METHOD) live in that
